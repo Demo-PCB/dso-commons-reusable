@@ -1,0 +1,71 @@
+# ./.github/actions/cosign/action.yml
+# Composite Action: Sets up the complete Composite build environment.
+
+name: 'Cosign Artifacts'
+description: 'Sign an artifact with the keyless mode'
+
+inputs:
+  workflow_name:
+    description: "Workflow Name for validate and sign"
+    required: true
+    type: string
+    default: 'ci' 
+  mode:
+    description: "Mode verify or sign"
+    required: true
+    type: string
+    default: 'verify'
+  artifact_path:
+    description: "Artifact file path to sign"
+    required: true
+    type: string
+    default: ''
+  predicate_path:
+    description: "Predicate file path"
+    required: true
+    type: string
+    default: ''
+  output_result_path:
+    description: 'Output for sign'
+    required: false
+    type: string
+    default: ''
+  output_bundle_path:
+    description: 'Output for Bundle'
+    required: false
+    type: string
+    default: ''
+  output_attestation_path:
+    description: 'Output for attestation'
+    required: false
+    type: string
+    default: ''
+runs:
+  using: "composite"
+  steps:
+    - name: Install Cosign
+      uses: sigstore/cosign-installer@v3.7.0
+    - name: Generate Sign and certificate 
+      shell: bash
+      id: cosign-sign
+      if:  inputs.mode=='sign'
+      run: >
+        cosign attest-blob 
+        --type custom 
+        --bundle ${{inputs.output_bundle_path}} 
+        --predicate ${{inputs.predicate_path}} 
+        --output-attestation="${{inputs.output_attestation_path}}"  
+        --yes 
+        ${{inputs.artifact_path}} 
+    - name: Verify Sign
+      shell: bash
+      id: cosign-verify
+      if:  inputs.mode=='verify'
+      run: >
+        cosign verify-blob-attestation
+        --verbose
+        --type custom
+        --certificate-identity-regexp="https://github.com/marvin-lorenzo-ntt/dso-*"
+        --certificate-oidc-issuer=https://token.actions.githubusercontent.com  
+        --bundle ${{inputs.output_bundle_path}} 
+        ${{inputs.artifact_path}} 

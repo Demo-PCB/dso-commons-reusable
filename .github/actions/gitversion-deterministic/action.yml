@@ -1,0 +1,386 @@
+name: "Composite - Calculate Semantic Version"
+description: "Tag-driven, PR-range-aware semver with automatic suffix detection from commit messages. Supports [snapshot], [rc], [release] markers."
+
+inputs:
+  github-event-name:
+    description: "GitHub event name for context"
+    required: false
+    default: "push"
+  github-ref:
+    description: "GitHub ref for context"
+    required: false
+    default: "refs/heads/main"
+  github-head-ref:
+    description: "GitHub head ref (for PRs)"
+    required: false
+    default: ""
+  github-base-ref:
+    description: "GitHub base ref (for PRs)"
+    required: false
+    default: ""
+  github-event-number:
+    description: "GitHub event number (for PRs)"
+    required: false
+    default: ""
+  initial-version:
+    description: "Initial version when no tags exist"
+    required: false
+    default: "1.0.0"
+  freeze-first-release:
+    description: "If true, do not bump when there are no tags; emit initial-version"
+    required: false
+    default: "true"
+  enable-auto-suffix:
+    description: "Enable automatic suffix detection from commit messages ([snapshot], [rc], [release])"
+    required: false
+    default: "true"
+  suffix-only-head:
+    description: "If true, detect suffix ([snapshot]/[rc]/[release]) using only the latest commit (HEAD) instead of the full range"
+    required: false
+    default: "false"
+
+outputs:
+  semVer:
+    description: "Clean MajorMinorPatch version for snapshot deployments"
+    value: ${{ steps.get-version.outputs.semVer }}
+  fullSemVer:
+    description: "Full semantic version with pre-release tags and suffix"
+    value: ${{ steps.get-version.outputs.fullSemVer }}
+  detected-suffix:
+    description: "Detected suffix from commit message (snapshot, rc, release, or empty)"
+    value: ${{ steps.get-version.outputs.detected-suffix }}
+  correlative:
+    description: "Correlative number for the suffix (e.g., 1 in 1.0.1-snapshot.1)"
+    value: ${{ steps.get-version.outputs.correlative }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Set Version Output (Tag-Driven, PR-range-aware, freeze first release)
+      id: get-version
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        echo "🔧 Sync full history & tags"
+        git fetch --force --prune --tags
+        BASE_REF="${{ inputs.github-base-ref }}"
+        HEAD_REF="${{ inputs.github-head-ref }}"
+        if [[ -n "${BASE_REF}" ]]; then
+          git fetch origin "${BASE_REF}:${BASE_REF}" || true
+        fi
+
+        echo "🔎 Detect last tag (stable preferred, else any incl. prerelease)"
+        LAST_STABLE="$(git tag --list --sort=-version:refname \
+          | grep -E '^(v)?[0-9]+\.[0-9]+\.[0-9]+$' | head -n1 || true)"
+        LAST_ANY="$(git tag --list --sort=-version:refname | head -n1 || true)"
+        LAST_TAG_RAW="${LAST_STABLE:-$LAST_ANY}"
+
+        # ── VERIFICAR SI EL ÚLTIMO TAG ES SNAPSHOT O RC ──────────────────────────
+        # Si el último tag tiene -snapshot.x o -rc.x, no calcular bump
+        SKIP_BUMP=false
+        if [[ -n "${LAST_TAG_RAW}" ]]; then
+          # Remover 'v' si existe
+          TAG_WITHOUT_V="${LAST_TAG_RAW#v}"
+          
+          # Verificar si tiene sufijo -snapshot.x o -rc.x
+          if [[ "${TAG_WITHOUT_V}" =~ -snapshot\.[0-9]+$ ]] || [[ "${TAG_WITHOUT_V}" =~ -rc\.[0-9]+$ ]]; then
+            echo "⚠️  Last tag '${LAST_TAG_RAW}' is a snapshot/rc tag"
+            echo "⚠️  Skipping bump calculation - will use existing base version"
+            SKIP_BUMP=true
+          fi
+        fi
+
+        # Derivar base X.Y.Z
+        BASE=""
+        if [[ -n "${LAST_TAG_RAW}" ]]; then
+          TMP="${LAST_TAG_RAW#v}"
+          TMP="${TMP%%+*}"
+          BASE_NUM="${TMP%%-*}"
+          [[ "${BASE_NUM}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] && BASE="${BASE_NUM}" || true
+        fi
+
+        FIRST_RUN=false
+        if [[ -z "${BASE}" ]]; then
+          BASE="${{ inputs.initial-version }}"
+          FIRST_RUN=true
+        fi
+
+        MAJOR="${BASE%%.*}"
+        REST="${BASE#*.}"
+        MINOR="${REST%%.*}"
+        PATCH="${REST##*.}"
+
+        EVENT="${{ inputs.github-event-name }}"
+        REF="${{ inputs.github-ref }}"
+        PRNUM="${{ inputs.github-event-number }}"
+
+        # ── RANGO DE COMMITS ──────────────────────────────────────────────────────
+        if [[ -n "${LAST_TAG_RAW}" ]]; then
+          RANGE="${LAST_TAG_RAW}..HEAD"
+        else
+          if [[ "${EVENT}" == "pull_request" && -n "${BASE_REF}" ]]; then
+            MB="$(git merge-base HEAD "origin/${BASE_REF}" || true)"
+            if [[ -n "${MB}" ]]; then
+              RANGE="${MB}..HEAD"
+            else
+              RANGE="HEAD~200..HEAD"  # fallback conservador
+            fi
+          else
+            RANGE="HEAD~200..HEAD"     # push a rama sin tags: últimos 200 commits
+          fi
+        fi
+
+        echo "🧭 Commits range for bump: ${RANGE}"
+
+        # ── MENSAJES RELEVANTES DEL RANGO (EXCLUYENDO .github Y README.md) ───────
+        # Solo consideramos commits que tocan archivos fuera de .github/ y README.md
+        COMMITS=$(
+          git log --pretty=format:"%s%n%b" ${RANGE} \
+            -- . \
+            ':(exclude).github' \
+            ':(exclude)README.md' \
+          || true
+        )
+
+        # ── LISTA DE COMMITS PARA AUTO-SUFFIX ────────────────────────────────────
+        # Obtener lista completa de commits (hash + subject) para detectar marcadores
+        ALL_COMMITS_LIST=$(
+          git log ${RANGE} --pretty='format:%h %s' \
+            -- . ':(exclude).github' ':(exclude)README.md' \
+          || true
+        )
+
+        # Último commit (HEAD) para modo restricto
+        HEAD_COMMIT_LIST=$(
+          git log -1 --pretty='format:%h %s' \
+            -- . ':(exclude).github' ':(exclude)README.md' \
+          || true
+        )
+
+        # ── POLÍTICA DE BUMP ─────────────────────────────────────────────────────
+        bump="none"
+        bump_reason="No bump (no matching commits en paths del proyecto)"
+        bump_rule=""  # breaking | major_header | minor | patch
+
+        # Regex
+        NO_BUMP_REGEX='^(improvement|improve|update|change|modify)(\(.+\))?:'
+        MAJOR_HEADER_REGEX='^(build|chore|ci|docs|feat|fix|perf|refactor|revert|style|test)(\(.+\))?!:'
+        MINOR_REGEX='^(feat)(\(.+\))?:'
+        PATCH_REGEX='^(fix|build|chore|ci|docs|perf|refactor|revert|style|test)(\(.+\))?:'
+
+        if [[ "${SKIP_BUMP}" == "true" ]]; then
+          bump="none"
+          bump_reason="Last tag is snapshot/rc - no bump calculated"
+        elif [[ "${FIRST_RUN}" == "true" && "${{ inputs.freeze-first-release }}" == "true" ]]; then
+          bump="none"
+          bump_reason="First run with freeze-first-release=true; staying at initial-version"
+        else
+          if echo "$COMMITS" | grep -qE '(^|\n)BREAKING CHANGE:'; then
+            bump="major"
+            bump_reason="BREAKING CHANGE detected in commit body (fuera de .github/README)"
+            bump_rule="breaking"
+          elif echo "$COMMITS" | grep -qE "${MAJOR_HEADER_REGEX}"; then
+            bump="major"
+            bump_reason="Header with '!' (breaking header) detected (fuera de .github/README)"
+            bump_rule="major_header"
+          else
+            COMMITS_NO_IMP="$(echo "$COMMITS" | grep -Ev "${NO_BUMP_REGEX}" || true)"
+            if echo "$COMMITS_NO_IMP" | grep -qE "${MINOR_REGEX}"; then
+              bump="minor"
+              bump_reason="feat commit detected (fuera de .github/README)"
+              bump_rule="minor"
+            elif echo "$COMMITS_NO_IMP" | grep -qE "${PATCH_REGEX}"; then
+              bump="patch"
+              bump_reason="fix/build/chore/ci/docs/... commit detected (fuera de .github/README)"
+              bump_rule="patch"
+            fi
+          fi
+        fi
+
+        # ── TRAZA: QUÉ COMMIT DISPARÓ EL BUMP ────────────────────────────────────
+        bump_commits_list=""
+        bump_first_commit=""
+
+        if [[ "$bump" != "none" && -n "$bump_rule" ]]; then
+          case "$bump_rule" in
+            breaking)
+              bump_commits_list="$(
+                git log ${RANGE} --grep='BREAKING CHANGE:' --pretty='format:%h %s' \
+                  -- . ':(exclude).github' ':(exclude)README.md' \
+                || true
+              )"
+              ;;
+            major_header)
+              HEADER_NO_ANCHOR="${MAJOR_HEADER_REGEX#^}"
+              bump_commits_list="$(
+                git log ${RANGE} --pretty='format:%h %s' \
+                  -- . ':(exclude).github' ':(exclude)README.md' \
+                  | grep -E " ${HEADER_NO_ANCHOR}" || true
+              )"
+              ;;
+            minor)
+              HEADER_NO_ANCHOR="${MINOR_REGEX#^}"
+              bump_commits_list="$(
+                git log ${RANGE} --pretty='format:%h %s' \
+                  -- . ':(exclude).github' ':(exclude)README.md' \
+                  | grep -E " ${HEADER_NO_ANCHOR}" || true
+              )"
+              ;;
+            patch)
+              HEADER_NO_ANCHOR="${PATCH_REGEX#^}"
+              bump_commits_list="$(
+                git log ${RANGE} --pretty='format:%h %s' \
+                  -- . ':(exclude).github' ':(exclude)README.md' \
+                  | grep -E " ${HEADER_NO_ANCHOR}" || true
+              )"
+              ;;
+          esac
+
+          bump_first_commit="$(echo "$bump_commits_list" | head -n1 || true)"
+        fi
+
+        echo "🧩 BUMP DECISION TRACE"
+        echo "────────────────────────"
+        echo "➡️ Bump decided: $bump"
+        echo "➡️ Reason: $bump_reason"
+        if [[ "$bump" != "none" && -n "$bump_first_commit" ]]; then
+          echo "➡️ First matching commit (hash + subject):"
+          echo "   $bump_first_commit"
+          echo "📜 All matching commits for this rule (solo paths del proyecto, sin .github/README.md):"
+          echo "$bump_commits_list"
+        else
+          echo "➡️ No specific commit triggered a bump (either no bump, solo cambios en .github/README.md o first run frozen)."
+        fi
+        echo "────────────────────────"
+
+        # ── APLICAR BUMP ──────────────────────────────────────────────────────────
+        case "$bump" in
+          major) MAJOR=$((MAJOR+1)); MINOR=0; PATCH=0 ;;
+          minor) MINOR=$((MINOR+1)); PATCH=0 ;;
+          patch) PATCH=$((PATCH+1)) ;;
+          none)  ;; # sin bump
+        esac
+
+        BASE_BUMPED="${MAJOR}.${MINOR}.${PATCH}"
+
+        SHORTSHA="$(git rev-parse --short HEAD || echo unknown)"
+        COUNT="$(git rev-list --count HEAD || echo 1)"
+
+        # ── DETECCIÓN AUTOMÁTICA DE SUFIJOS (Opción A pura) ──────────────────────
+        DETECTED_SUFFIX=""
+        CORRELATIVE=""
+        
+        if [[ "${{ inputs.enable-auto-suffix }}" == "true" ]]; then
+          echo ""
+          echo "🏷️ AUTO-SUFFIX MODE ENABLED"
+          echo "────────────────────────────"
+          
+          # Buscar marcadores en los commits
+          # Si hay bump, usar bump_commits_list; si SKIP_BUMP, usar ALL_COMMITS_LIST
+          commits_to_check=""
+          if [[ "${{ inputs.suffix-only-head }}" == "true" ]]; then
+            commits_to_check="$HEAD_COMMIT_LIST"
+            echo "ℹ️  Suffix detection: last commit only (HEAD)"
+          else
+            if [[ "${SKIP_BUMP}" == "true" ]]; then
+              commits_to_check="$ALL_COMMITS_LIST"
+              echo "ℹ️  Using all commits in range (SKIP_BUMP mode)"
+            elif [[ -n "$bump_commits_list" ]]; then
+              commits_to_check="$bump_commits_list"
+              echo "ℹ️  Using bump-triggering commits"
+            else
+              commits_to_check="$ALL_COMMITS_LIST"
+              echo "ℹ️  No bump commits, using all commits in range"
+            fi
+          fi
+          
+          if [[ -n "$commits_to_check" ]]; then
+            # Extraer solo los mensajes de commit
+            commit_messages="$(echo "$commits_to_check" | cut -d' ' -f2- || echo '')"
+            
+            # Buscar [release], [rc], [snapshot] en orden de prioridad
+            if echo "$commit_messages" | grep -qiE '\[release\]'; then
+              DETECTED_SUFFIX="release"
+              echo "✅ Detected: [release] marker → version will be: ${BASE_BUMPED}"
+            elif echo "$commit_messages" | grep -qiE '\[rc\]'; then
+              DETECTED_SUFFIX="rc"
+              echo "✅ Detected: [rc] marker"
+            elif echo "$commit_messages" | grep -qiE '\[snapshot\]'; then
+              DETECTED_SUFFIX="snapshot"
+              echo "✅ Detected: [snapshot] marker"
+            else
+              # Sin marcador explícito → default a snapshot
+              DETECTED_SUFFIX="snapshot"
+              echo "ℹ️  No marker found → defaulting to 'snapshot'"
+            fi
+          else
+            # Sin commits → default a snapshot
+            DETECTED_SUFFIX="snapshot"
+            echo "ℹ️  No commits in range → defaulting to 'snapshot'"
+          fi
+          
+          # Calcular correlativo solo si NO es release
+          if [[ "$DETECTED_SUFFIX" != "release" ]]; then
+            echo "🔢 Calculating correlative for suffix: ${DETECTED_SUFFIX}"
+            
+            # Buscar tags con el mismo base + sufijo, con y sin prefijo 'v'
+            tag_pattern_v="v${BASE_BUMPED}-${DETECTED_SUFFIX}.*"
+            tag_pattern_nov="${BASE_BUMPED}-${DETECTED_SUFFIX}.*"
+            existing_tags=$( { git tag -l "$tag_pattern_v"; git tag -l "$tag_pattern_nov"; } 2>/dev/null | sort -V | uniq || echo "")
+            echo "   Patterns: [$tag_pattern_v] | [$tag_pattern_nov]"
+            echo "   Found tags:\n$existing_tags"
+            
+            if [[ -n "$existing_tags" ]]; then
+              # Obtener el último correlativo
+              last_tag=$(echo "$existing_tags" | tail -n1)
+              # Extraer el número después del último punto (ej: v1.0.1-snapshot.5 → 5)
+              last_correlative=$(echo "$last_tag" | grep -oE '[0-9]+$' || echo "0")
+              CORRELATIVE=$((last_correlative + 1))
+              echo "   Last tag: $last_tag (correlative: $last_correlative)"
+              echo "   Next correlative: $CORRELATIVE"
+            else
+              # Primer tag con este sufijo
+              CORRELATIVE=1
+              echo "   No existing tags with this suffix → correlative: $CORRELATIVE"
+            fi
+            
+            FULL="${BASE_BUMPED}-${DETECTED_SUFFIX}.${CORRELATIVE}"
+          else
+            # Release → sin sufijo ni correlativo
+            CORRELATIVE=""
+            FULL="${BASE_BUMPED}"
+          fi
+          
+          echo "────────────────────────────"
+          echo "📦 Final version: ${FULL}"
+          
+        else
+          # Modo legacy (sin auto-suffix)
+          if [[ "$EVENT" == "pull_request" && -n "$PRNUM" ]]; then
+            FULL="${BASE_BUMPED}-pr.${PRNUM}.${SHORTSHA}"
+          elif [[ "$EVENT" == "push" && ( "$REF" == "refs/heads/main" || "$REF" == "refs/heads/master" ) ]]; then
+            FULL="${BASE_BUMPED}"
+          else
+            FULL="${BASE_BUMPED}-dev.${COUNT}.${SHORTSHA}"
+          fi
+        fi
+
+        echo ""
+        echo "📌 SUMMARY"
+        echo "────────────────────────────"
+        echo "📌 Last tag (raw): ${LAST_TAG_RAW:-<none>}"
+        echo "📌 Base numeric: ${BASE}"
+        echo "📌 First run (no tags): ${FIRST_RUN}"
+        echo "📌 semVer: ${BASE_BUMPED}"
+        echo "📌 fullSemVer: ${FULL}"
+        if [[ "${{ inputs.enable-auto-suffix }}" == "true" ]]; then
+          echo "📌 detected-suffix: ${DETECTED_SUFFIX}"
+          echo "📌 correlative: ${CORRELATIVE}"
+        fi
+        echo "────────────────────────────"
+
+        echo "semVer=${BASE_BUMPED}" >> "$GITHUB_OUTPUT"
+        echo "fullSemVer=${FULL}" >> "$GITHUB_OUTPUT"
+        echo "detected-suffix=${DETECTED_SUFFIX}" >> "$GITHUB_OUTPUT"
+        echo "correlative=${CORRELATIVE}" >> "$GITHUB_OUTPUT"

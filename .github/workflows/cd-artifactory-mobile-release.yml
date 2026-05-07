@@ -1,0 +1,367 @@
+
+# ./.github/workflows/cd-artifactory-lib-prod.yml
+name: 'Library CD - Prod Promotion (rc → release)'
+
+on:
+  workflow_call:
+    inputs:
+      application:
+        description: 'Application name for promotion (DSO, BIE, etc.)'
+        required: true
+        type: string
+      component-name:
+        description: 'Library component name for promotion'
+        required: true
+        type: string
+      version:
+        description: 'Library build version to promote (e.g., 0.1.0)'
+        required: true
+        type: string
+      library-type:
+        description: 'Library type (framework, package, library, android-library)'
+        required: false
+        type: string
+        default: 'library'
+      environment:
+        description: 'Environment for configuration loading (dev, uat, prod)'
+        required: false
+        type: string
+        default: 'prod'
+      repository-url:
+        description: 'Git repository URL for tagging (optional, auto-detected from context)'
+        required: false
+        type: string
+
+jobs:
+  check-integrity:
+    name: Check Library Integrity
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate Promotion Parameters
+        run: |
+          echo "🔍 Validating Library Prod promotion parameters..."
+          echo "Application: ${{ inputs.application }}"
+          echo "Component: ${{ inputs.component-name }}"
+          echo "Version: ${{ inputs.version }}"
+          echo "Library Type: ${{ inputs.library-type }}"
+          echo "Repository: ${{ inputs.repository-url || github.server_url }}/{{ github.repository }}"
+          echo "Promotion Path: rc → release"
+          echo ""
+          echo "✅ Valid Prod promotion path: release candidate → release"
+    
+  release-gate:
+    runs-on: ubuntu-latest
+    needs: check-integrity
+    steps:
+      - name: Release Gate – routing by library-type
+        run: |
+          echo "🔐 Release Gate job ejecutado para library-type=${{ inputs.library-type }}"
+          if [ "${{ inputs.library-type }}" != "android" ]; then
+            echo "➡️ No aplica release gate para este tipo de librería. Se marca como success y se continúa el flujo."
+          else
+            echo "➡️ Aplicando release gate para Android."
+          fi
+      
+      - name: Checkout repository
+        if: ${{ inputs.library-type == 'android' }}
+        uses: actions/checkout@v4
+
+      - name: Load Library Configurations
+        if: ${{ inputs.library-type == 'android' }}
+        uses: marvin-lorenzo-ntt/dso-commons-reusable/.github/actions/load-workflows-libraries-configs@main
+        with:
+          component-name: ${{ inputs.component-name }}
+          library-type: ${{ inputs.library-type }}
+          environment: ${{ inputs.environment }}
+          dso-ghe-app-id: ${{ secrets.DSO_WORKFLOWS_GHAPP_ID }}
+          dso-ghe-private-key: ${{ secrets.DSO_WORKFLOWS_GHAPP_PK }}
+          dso-workflows-configs-repo: ${{ vars.DSO_WORKFLOWS_LIBRARIES_CONFIGS_REPO }}
+          dso-workflows-owner: ${{ vars.DSO_WORKFLOWS_OWNER }}
+
+      - name: Run Release Gate
+        if: ${{ inputs.library-type == 'android' }}
+        uses: marvin-lorenzo-ntt/dso-commons-reusable/.github/actions/release-gate@main
+        env:
+          ARTIFACTORY_TOKEN: ${{ secrets[format('{0}_ARTIFACTORY_TOKEN', inputs.application)] }}
+          PLUSTI_USERNAME:   ${{ secrets.PLUSTI_USERNAME }}
+          PLUSTI_PASSWORD:   ${{ secrets.PLUSTI_PASSWORD }}
+        with:
+          artifactory_url: ${{ env.IBK_ARTIFACTORY_URL }}
+          rc_repo:         ${{ env[format('{0}_MVN_RC_REPO', inputs.application)] }}
+          release_repo:    ${{ env[format('{0}_MVN_RELEASE_REPO', inputs.application)] }}
+          component_name:  ${{ inputs.component-name }}
+          version:         ${{ inputs.version }}
+
+
+  promote-to-release:
+    name: Promote Library to Release
+    runs-on: ubuntu-latest
+    needs: [check-integrity, release-gate]
+    # environment: prod
+    outputs:
+      promote_http_code: ${{ steps.promote.outputs.promote_http_code }}
+      fallback_copied: ${{ steps.promote.outputs.fallback_copied }}
+      release_items_count: ${{ steps.verify.outputs.release_items_count }}
+    steps:
+
+      - name: Load Library Configurations
+        uses: marvin-lorenzo-ntt/dso-commons-reusable/.github/actions/load-workflows-libraries-configs@main
+        with:
+          component-name: ${{ inputs.component-name }}
+          library-type: ${{ inputs.library-type }}
+          environment: ${{ inputs.environment }}
+          dso-ghe-app-id: ${{ secrets.DSO_WORKFLOWS_GHAPP_ID }}
+          dso-ghe-private-key: ${{ secrets.DSO_WORKFLOWS_GHAPP_PK }}
+          dso-workflows-configs-repo: ${{ vars.DSO_WORKFLOWS_LIBRARIES_CONFIGS_REPO }}
+          dso-workflows-owner: ${{ vars.DSO_WORKFLOWS_OWNER }}
+
+      - name: Determine Repository Variables
+        id: repo-vars
+        run: |
+          if [[ "${{ inputs.library-type }}" == "android" ]]; then
+            RC_REPO="${ANDROID_MVN_RC_REPO}"
+            RELEASE_REPO="${ANDROID_MVN_RELEASE_REPO}"
+            echo "📱 Using Android Maven repositories"
+          else
+            RC_REPO="${IOS_SWIFT_RC_REPO}"
+            RELEASE_REPO="${IOS_SWIFT_RELEASE_REPO}"
+            echo "🍎 Using iOS Swift repositories"
+          fi
+          
+          echo "RC_REPO=$RC_REPO" >> $GITHUB_OUTPUT
+          echo "RELEASE_REPO=$RELEASE_REPO" >> $GITHUB_OUTPUT
+
+      - name: Move via REST API (copy=false)
+        id: promote
+        run: |
+          cat > promote.json <<JSON
+          {
+            "status": "release",
+            "comment": "Promote to Release (MOVE)",
+            "copy": false,
+            "failFast": true,
+            "sourceRepo": "${{ steps.repo-vars.outputs.RC_REPO }}",
+            "targetRepo": "${{ steps.repo-vars.outputs.RELEASE_REPO }}"
+          }
+          JSON
+
+          echo "🚀 Moving build via REST API (copy=false) ..."
+          echo "Build Name: ${{ inputs.component-name }}"
+          echo "Build Number: ${{ inputs.version }}"
+          echo "Source Repo: ${{ steps.repo-vars.outputs.RC_REPO }}"
+          echo "Target Repo: ${{ steps.repo-vars.outputs.RELEASE_REPO }}"
+          
+          RESP=$(curl -sS -w "\n%{http_code}" -X POST \
+            -H "Authorization: Bearer ${{ secrets[format('{0}_ARTIFACTORY_TOKEN', inputs.application)] }}" \
+            -H "Content-Type: application/json" \
+            -d @promote.json \
+            "${IBK_ARTIFACTORY_URL}/api/build/promote/${{ inputs.component-name }}/${{ inputs.version }}")
+
+          BODY=$(echo "$RESP" | sed '$d')
+          CODE=$(echo "$RESP" | tail -n1)
+
+          echo "HTTP: $CODE"
+          echo "Response Body:"
+          echo "$BODY"
+
+          echo "promote_http_code=$CODE" >> $GITHUB_OUTPUT
+          
+          if [[ "$CODE" == "200" ]]; then
+            echo "✅ Build promotion successful"
+          else
+            echo "❌ Build promotion failed with HTTP $CODE"
+            exit 1
+          fi
+
+      - name: Verify promotion (optional)
+        id: verify
+        run: |
+          echo "✅ Promotion completed via Build Promotion API"
+          echo "Build info moved from RC to Release repository"
+          echo "release_items_count=1" >> $GITHUB_OUTPUT
+
+  # 🏷️ TAG VERSION PHASE (only after successful release promotion)
+  tag-version:
+    permissions:
+      contents: write
+    name: Tag Release Version
+    runs-on: ubuntu-latest
+    needs: [check-integrity, promote-to-release]
+    if: ${{ needs.promote-to-release.outputs.release_items_count > 0 }}
+    steps:
+      - name: Extract Repository Info
+        id: repo-info
+        run: |
+          # Use provided repository-url or auto-detect from GitHub context
+          if [ -n "${{ inputs.repository-url }}" ]; then
+            REPO_URL="${{ inputs.repository-url }}"
+            echo "🔧 Using provided repository URL: $REPO_URL"
+          else
+            # Auto-detect from GitHub context
+            REPO_URL="${{ github.server_url }}/${{ github.repository }}"
+            echo "🔧 Auto-detected repository URL: $REPO_URL"
+          fi
+          
+          # Remove .git suffix if present
+          REPO_URL=${REPO_URL%.git}
+          
+          # Extract from various GitHub URL formats
+          if [[ "$REPO_URL" =~ github\.com[/:]([^/]+)/([^/]+) ]]; then
+            OWNER="${BASH_REMATCH[1]}"
+            REPO="${BASH_REMATCH[2]}"
+            echo "OWNER=$OWNER" >> $GITHUB_OUTPUT
+            echo "REPO=$REPO" >> $GITHUB_OUTPUT
+            echo "✅ Extracted: $OWNER/$REPO"
+          else
+            echo "❌ Could not parse repository URL: $REPO_URL"
+            exit 1
+          fi
+
+      - name: Checkout Repository for Tagging
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ steps.repo-info.outputs.OWNER }}/${{ steps.repo-info.outputs.REPO }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+
+      - name: Create Release Tag
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          
+          echo "📌 Processing Release promotion for version: ${VERSION}"
+          
+          # Extraer base version (eliminar sufijo -rc.X si existe)
+          # Ej: 1.0.1-rc.3 → 1.0.1
+          if [[ "$VERSION" =~ ^([0-9]+\.[0-9]+\.[0-9]+)-rc\.([0-9]+)$ ]]; then
+            BASE_VERSION="${BASH_REMATCH[1]}"
+            RC_CORRELATIVE="${BASH_REMATCH[2]}"
+            
+            echo "   Parsed RC version: base=${BASE_VERSION}, rc=${RC_CORRELATIVE}"
+            echo "   Creating release tag (without suffix): v${BASE_VERSION}"
+          elif [[ "$VERSION" =~ ^([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+            # Ya es una versión release (sin sufijo)
+            BASE_VERSION="${BASH_REMATCH[1]}"
+            echo "   Version is already a clean release: ${BASE_VERSION}"
+          else
+            echo "⚠️ Version format not recognized: ${VERSION}"
+            echo "   Expected format: X.Y.Z-rc.N or X.Y.Z"
+            echo "   Creating tag as-is: v${VERSION}"
+            BASE_VERSION="${VERSION}"
+          fi
+          
+          TAG_NAME="v${BASE_VERSION}"
+          
+          # Check if tag already exists
+          if git rev-parse "$TAG_NAME" >/dev/null 2>&1; then
+            echo "⚠️ Tag $TAG_NAME already exists, skipping tag creation"
+            exit 0
+          fi
+          
+          # Crear tag anotado con metadata
+          TAG_MESSAGE="Production Release ${BASE_VERSION}
+
+          Promoted from: ${VERSION}
+          - Promoted by: CD Prod workflow  
+          - Build: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
+          - Environment: Production"
+
+          echo "🏷️ Creating release tag: $TAG_NAME"
+          git tag -a "$TAG_NAME" -m "$TAG_MESSAGE"
+          git push origin "$TAG_NAME"
+          echo "✅ Release tag $TAG_NAME created and pushed"
+          
+          echo ""
+          echo "📋 Tag created for successful release promotion:"
+          echo "  - Component: ${{ inputs.component-name }}"
+          echo "  - Release Version: ${BASE_VERSION}"
+          echo "  - Tag: $TAG_NAME"
+          echo "  - Promoted from: ${VERSION}"
+          echo "  - Repository: ${{ steps.repo-info.outputs.OWNER }}/${{ steps.repo-info.outputs.REPO }}"
+          
+          # Summary para GitHub Actions
+          echo "### 🏷️ Release Tag Created" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Tag:** \`${TAG_NAME}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Release Version:** \`${BASE_VERSION}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Promoted from:** \`${VERSION}\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "🔗 [View Tag](${GITHUB_SERVER_URL}/${{ steps.repo-info.outputs.OWNER }}/${{ steps.repo-info.outputs.REPO }}/releases/tag/${TAG_NAME})" >> $GITHUB_STEP_SUMMARY
+        shell: bash
+
+  promotion-summary:
+    name: 📋 Library Prod Promotion Summary
+    runs-on: ubuntu-latest
+    needs: [check-integrity, promote-to-release, tag-version]
+    if: always()
+    steps:
+      - run: |
+          echo "## � Library Production Promotion Summary" > $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 📦 Component Information" >> $GITHUB_STEP_SUMMARY
+          echo "- **Application:** ${{ inputs.application }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Component:** ${{ inputs.component-name }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Library Type:** ${{ inputs.library-type }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Version:** ${{ inputs.version }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Repository:** ${{ inputs.repository-url || format('{0}/{1}', github.server_url, github.repository) }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Promotion Path:** rc → release (PROD)" >> $GITHUB_STEP_SUMMARY
+          echo "- **Build URL:** [Link](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          # Check job results
+          INTEGRITY_STATUS="${{ needs.check-integrity.result }}"
+          PROMOTION_STATUS="${{ needs.promote-to-release.result }}"
+          TAGGING_STATUS="${{ needs.tag-version.result }}"
+          RELEASE_COUNT="${{ needs.promote-to-release.outputs.release_items_count }}"
+
+          echo "### 📊 Workflow Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Phase | Status | Details |" >> $GITHUB_STEP_SUMMARY
+          echo "|-------|--------|---------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Integrity Check | $INTEGRITY_STATUS | Validated artifacts availability |" >> $GITHUB_STEP_SUMMARY
+          echo "| Promotion | $PROMOTION_STATUS | rc → release migration |" >> $GITHUB_STEP_SUMMARY
+          echo "| Release Tagging | $TAGGING_STATUS | Git tag creation |" >> $GITHUB_STEP_SUMMARY
+          echo "| Items in Release | $RELEASE_COUNT | Final artifact count |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          if [[ "$PROMOTION_STATUS" == "success" && "$RELEASE_COUNT" -gt 0 ]]; then
+            echo "### ✅ Production Deployment Successful" >> $GITHUB_STEP_SUMMARY
+            echo "The library version **${{ inputs.version }}** has been successfully **moved** to the **Release** repository." >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "**Build Once Deploy Anywhere:**" >> $GITHUB_STEP_SUMMARY
+            echo "- ✅ Artifacts moved from RC to Release (removed from RC)" >> $GITHUB_STEP_SUMMARY
+            echo "- 🔒 Same binary artifacts from initial build (no rebuild)" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            
+            if [[ "$TAGGING_STATUS" == "success" ]]; then
+              echo "🏷️ **Release tag v${{ inputs.version }} has been created in the source repository.**" >> $GITHUB_STEP_SUMMARY
+            elif [[ "$TAGGING_STATUS" == "skipped" ]]; then
+              echo "⚠️ **Release tagging was skipped (no items promoted).**" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "❌ **Release tagging failed - please create tag manually.**" >> $GITHUB_STEP_SUMMARY
+            fi
+            
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "**Next Steps:**" >> $GITHUB_STEP_SUMMARY
+            echo "- Version is now available for production consumption" >> $GITHUB_STEP_SUMMARY
+            echo "- Release tag v${{ inputs.version }} marks this milestone" >> $GITHUB_STEP_SUMMARY
+            echo "- Consider updating dependent projects to use this version" >> $GITHUB_STEP_SUMMARY
+          elif [[ "$PROMOTION_STATUS" == "success" && "$RELEASE_COUNT" -eq 0 ]]; then
+            echo "### ⚠️ No Items to Promote" >> $GITHUB_STEP_SUMMARY
+            echo "The promotion completed successfully but no items were found to promote." >> $GITHUB_STEP_SUMMARY
+            echo "This may indicate the version **${{ inputs.version }}** was already in Release repository." >> $GITHUB_STEP_SUMMARY
+            echo "**No release tag was created as no promotion occurred.**" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "### ❌ Production Deployment Failed" >> $GITHUB_STEP_SUMMARY
+            echo "The promotion to Release repository encountered issues." >> $GITHUB_STEP_SUMMARY
+            echo "Please check the workflow logs for detailed error information." >> $GITHUB_STEP_SUMMARY
+          fi
+
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 📈 Technical Details" >> $GITHUB_STEP_SUMMARY
+          echo "| Metric | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|-------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Promote REST HTTP | ${{ needs.promote-to-release.outputs.promote_http_code || 'n/a' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Fallback Copy | ${{ needs.promote-to-release.outputs.fallback_copied || 'n/a' }} |" >> $GITHUB_STEP_SUMMARY

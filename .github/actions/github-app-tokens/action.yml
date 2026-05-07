@@ -1,0 +1,186 @@
+name: 'Generate GitHub App installation tokens (Arch + Team)'
+description: 'Genera tokens de instalación para dos GitHub Apps: Arquitectura (ads-*) y Equipo/Aplicación'
+author: 'IBK Platform'
+
+inputs:
+  arch-app-id:
+    description: 'GitHub App ID para librerías de Arquitectura (ads-*)'
+    required: false
+  arch-app-private-key:
+    description: 'Private key (PEM) del GitHub App de Arquitectura'
+    required: false
+  team-app-id:
+    description: 'GitHub App ID para librerías del Equipo/Aplicación'
+    required: false
+  team-app-private-key:
+    description: 'Private key (PEM) del GitHub App del Equipo/Aplicación'
+    required: false
+  github-host:
+    description: 'Host de GitHub (github.com o tu GHE)'
+    required: false
+    default: 'github.com'
+
+outputs:
+  arch-libs-token:
+    description: 'Installation access token para librerías de Arquitectura (ads-*)'
+    value: ${{ steps.generate-tokens.outputs.arch_libs_token }}
+  team-libs-token:
+    description: 'Installation access token para librerías del Equipo/Aplicación'
+    value: ${{ steps.generate-tokens.outputs.team_libs_token }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Generate installation tokens from GitHub Apps (no pip)
+      id: generate-tokens
+      shell: bash
+      env:
+        ARCH_APP_ID: ${{ inputs.arch-app-id }}
+        ARCH_APP_PK: ${{ inputs.arch-app-private-key }}
+        TEAM_APP_ID: ${{ inputs.team-app-id }}
+        TEAM_APP_PK: ${{ inputs.team-app-private-key }}
+        GITHUB_HOST: ${{ inputs.github-host }}
+      run: |
+        set -euo pipefail
+
+        if ! command -v curl >/dev/null 2>&1; then
+          echo "❌ curl no disponible en el runner"
+          exit 1
+        fi
+
+        if ! command -v openssl >/dev/null 2>&1; then
+          echo "❌ openssl no disponible en el runner"
+          exit 1
+        fi
+
+        if ! command -v jq >/dev/null 2>&1; then
+          echo "❌ jq no disponible en el runner"
+          exit 1
+        fi
+
+        github_api_root="https://api.${GITHUB_HOST}"
+
+        b64url() {
+          # base64 → base64url (sin '=')
+          openssl base64 -e -A | tr '+/' '-_' | tr -d '='
+        }
+
+        gen_jwt_and_token() {
+          local APP_ID="$1"
+          local APP_PK="$2"
+
+          if [[ -z "${APP_ID}" || -z "${APP_PK}" ]]; then
+            echo ""
+            return 0
+          fi
+
+          local KEY_FILE="github-app-${APP_ID}-key.pem"
+          printf '%s\n' "${APP_PK}" > "${KEY_FILE}"
+
+          local NOW
+          NOW=$(date +%s)
+          local EXP=$((NOW + 540)) # 9 minutos
+
+          local HEADER='{"alg":"RS256","typ":"JWT"}'
+          local PAYLOAD
+          PAYLOAD=$(printf '{"iat":%s,"exp":%s,"iss":"%s"}' "${NOW}" "${EXP}" "${APP_ID}")
+
+          local HEADER_B64
+          local PAYLOAD_B64
+
+          HEADER_B64=$(printf '%s' "${HEADER}" | b64url)
+          PAYLOAD_B64=$(printf '%s' "${PAYLOAD}" | b64url)
+
+          local UNSIGNED="${HEADER_B64}.${PAYLOAD_B64}"
+
+          # Firmar con RS256 usando openssl
+          local SIG_B64
+          SIG_B64=$(printf '%s' "${UNSIGNED}" | \
+            openssl dgst -sha256 -sign "${KEY_FILE}" -binary | \
+            b64url)
+
+          local JWT="${UNSIGNED}.${SIG_B64}"
+
+          # 4) obtener installations del app
+          local INSTALLATIONS
+          INSTALLATIONS=$(curl -sS \
+            -H "Authorization: Bearer ${JWT}" \
+            -H "Accept: application/vnd.github+json" \
+            "${github_api_root}/app/installations")
+
+          if [[ -z "${INSTALLATIONS}" ]]; then
+            echo "❌ No se pudo obtener lista de installations para el App ${APP_ID}"
+            rm -f "${KEY_FILE}"
+            return 1
+          fi
+
+          local INSTALLATION_ID
+          INSTALLATION_ID=$(printf '%s' "${INSTALLATIONS}" | jq -r '.[0].id')
+
+          if [[ -z "${INSTALLATION_ID}" || "${INSTALLATION_ID}" == "null" ]]; then
+            echo "❌ No se encontró installation.id para el App ${APP_ID}"
+            rm -f "${KEY_FILE}"
+            return 1
+          fi
+
+          # 5) crear installation access token
+          local TOKEN_RESP
+          TOKEN_RESP=$(curl -sS \
+            -X POST \
+            -H "Authorization: Bearer ${JWT}" \
+            -H "Accept: application/vnd.github+json" \
+            "${github_api_root}/app/installations/${INSTALLATION_ID}/access_tokens")
+
+          if [[ -z "${TOKEN_RESP}" ]]; then
+            echo "❌ Respuesta vacía al crear installation access token para App ${APP_ID}"
+            rm -f "${KEY_FILE}"
+            return 1
+          fi
+
+          local ACCESS_TOKEN
+          ACCESS_TOKEN=$(printf '%s' "${TOKEN_RESP}" | jq -r '.token')
+
+          rm -f "${KEY_FILE}"
+
+          if [[ -z "${ACCESS_TOKEN}" || "${ACCESS_TOKEN}" == "null" ]]; then
+            echo "❌ No se pudo extraer .token del access_token para App ${APP_ID}"
+            return 1
+          fi
+
+          printf '%s' "${ACCESS_TOKEN}"
+        }
+
+        ARCH_TOKEN=""
+        TEAM_TOKEN=""
+
+        # Token Arquitectura
+        if [[ -n "${ARCH_APP_ID:-}" && -n "${ARCH_APP_PK:-}" ]]; then
+          echo "🔐 Generando token para GitHub App de Arquitectura..."
+          ARCH_TOKEN="$(gen_jwt_and_token "${ARCH_APP_ID}" "${ARCH_APP_PK}")"
+          if [[ -n "${ARCH_TOKEN}" ]]; then
+            echo "✅ Token de Arquitectura generado (longitud: ${#ARCH_TOKEN})"
+          else
+            echo "⚠️  No se pudo generar token de Arquitectura"
+          fi
+        else
+          echo "ℹ️  GitHub App de Arquitectura no configurado, se omitirá."
+        fi
+
+        # Token Equipo/App
+        if [[ -n "${TEAM_APP_ID:-}" && -n "${TEAM_APP_PK:-}" ]]; then
+          echo "🔐 Generando token para GitHub App del Equipo/Aplicación..."
+          TEAM_TOKEN="$(gen_jwt_and_token "${TEAM_APP_ID}" "${TEAM_APP_PK}")"
+          if [[ -n "${TEAM_TOKEN}" ]]; then
+            echo "✅ Token de Equipo/App generado (longitud: ${#TEAM_TOKEN})"
+          else
+            echo "⚠️  No se pudo generar token de Equipo/App"
+          fi
+        else
+          echo "ℹ️  GitHub App del Equipo/Aplicación no configurado, se omitirá."
+        fi
+
+        {
+          echo "arch_libs_token=${ARCH_TOKEN}"
+          echo "team_libs_token=${TEAM_TOKEN}"
+        } >> "$GITHUB_OUTPUT"
+

@@ -1,0 +1,48 @@
+outputs:
+  publish-artifacts:
+    description: "Indicates whether artifacts should be published based on the branch type"
+    value: ${{ steps.set-vars.outputs.publish-artifacts }}
+
+runs:
+  using: "composite"
+  steps:
+  - name: "Set common variables"
+    id: set-vars
+    run: |
+      # Determine branch type
+      isMainBranch=$(echo "${GITHUB_REF}" | grep -E 'refs/heads/(main|master)' || true)
+      isDevelopBranch=$(echo "${GITHUB_REF}" | grep -E 'refs/heads/develop' || true)
+      isFeatureBranch=$(echo "${GITHUB_REF}" | grep -E 'refs/heads/feature/' || true)
+      isReleaseBranch=$(echo "${GITHUB_REF}" | grep -E 'refs/heads/release/' || true)
+      isHotfixBranch=$(echo "${GITHUB_REF}" | grep -E 'refs/heads/hotfix/' || true)
+      isPullRequest=$(echo "${GITHUB_REF}" | grep -E 'refs/pull/' || true)
+      isTag=$(echo "${GITHUB_REF}" | grep -E 'refs/tags/' || true)
+
+      # Determine event type
+      isRelease=$(echo "${GITHUB_EVENT_NAME}" | grep -E 'release' || true)
+      isPush=$(echo "${GITHUB_EVENT_NAME}" | grep -E 'push' || true)
+      isPullRequestEvent=$(echo "${GITHUB_EVENT_NAME}" | grep -E 'pull_request' || true)
+      isWorkflowDispatch=$(echo "${GITHUB_EVENT_NAME}" | grep -E 'workflow_dispatch' || true)
+
+      # Actions based on branch type
+      publishArtifacts=false
+      if [ -n "$isMainBranch" ] || [ -n "$isReleaseBranch" ] [-n "$isTag" ]; then
+        echo "This is a main or release branch or a tag."
+        publishArtifacts=true
+      elif [ -n "$isDevelopBranch" ]; then
+        echo "This is a develop branch."
+        publishArtifacts=true
+      elif [ -n "$isFeatureBranch" ]; then
+        echo "This is a feature branch."
+      elif [ -n "$isHotfixBranch" ]; then
+        echo "This is a hotfix branch."
+        publishArtifacts=true
+      elif [ -n "$isPullRequest" ]; then
+        echo "This is a pull request."
+      else
+        echo "Unknown branch type, not publishing artifacts."
+      fi
+
+      echo "publish-artifacts=$publishArtifacts" >> $GITHUB_OUTPUT
+      
+    shell: bash

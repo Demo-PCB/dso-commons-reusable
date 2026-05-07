@@ -1,0 +1,89 @@
+# ./.github/actions/load-workflows-libraries-configs/action.yml
+# Action to load workflow configurations for iOS libraries from external repository
+
+name: Load Workflows Libraries Configs
+description: "Action to load workflow configurations and environment variables for iOS libraries from a specified repository."
+
+inputs:
+  component-name:
+    description: 'Library component name to load specific flags'
+    required: true
+    type: string
+  library-type:
+    description: 'Type of library (ios, android, shared)'
+    required: false
+    type: string
+    default: 'ios'
+  environment:
+    description: 'Environment to load configurations for (dev, uat, prod)'
+    required: false
+    type: string
+    default: 'dev'
+  dso-ghe-app-id:
+    description: 'GitHub App ID for authentication'
+    required: true
+  dso-ghe-private-key:
+    description: 'GitHub App Private Key for authentication'
+    required: true
+  dso-workflows-configs-repo:
+    description: 'Repository containing the libraries workflow configurations'
+    required: true
+    type: string
+  dso-workflows-owner:
+    description: 'Owner of the workflows repository'
+    required: true
+    type: string
+
+runs:
+  using: 'composite'
+  steps:
+  - uses: actions/create-github-app-token@v2
+    id: app-token
+    with:
+      app-id: ${{ inputs.dso-ghe-app-id }}
+      private-key: ${{ inputs.dso-ghe-private-key }}
+      repositories: ${{ inputs.dso-workflows-configs-repo }}
+      owner: ${{ inputs.dso-workflows-owner }}
+
+  - uses: actions/checkout@v5
+    with:
+      token: ${{ steps.app-token.outputs.token }}
+      ref: main
+      repository: ${{ inputs.dso-workflows-owner }}/${{ inputs.dso-workflows-configs-repo }}
+      path: ${{ inputs.dso-workflows-configs-repo }}
+      persist-credentials: false
+      fetch-depth: 0
+      sparse-checkout: |
+        cnf-mobile
+        global-variables
+
+  - name: Load Library Environment Variables
+    uses: marvin-lorenzo-ntt/dso-commons-reusable/.github/actions/load-env-from-yaml@main
+    with:
+      yaml-path: |
+        ${{ inputs.dso-workflows-configs-repo }}/global-variables/common.yaml
+        ${{ inputs.dso-workflows-configs-repo }}/cnf-mobile/libraries-variables/default.yaml
+        ${{ inputs.dso-workflows-configs-repo }}/cnf-mobile/flags/flags-default.yaml
+        ${{ inputs.dso-workflows-configs-repo }}/cnf-mobile/flags/${{ inputs.component-name }}.yaml
+        ${{ inputs.dso-workflows-configs-repo }}/cnf-mobile/libraries-variables/${{ inputs.library-type }}/${{ inputs.environment }}/default.yaml
+        ${{ inputs.dso-workflows-configs-repo }}/cnf-mobile/libraries-variables/${{ inputs.library-type }}/${{ inputs.environment }}/${{ inputs.component-name }}.yaml
+
+  - name: Display Loaded Configuration Summary
+    shell: bash
+    run: |
+      echo "📚 Library Configuration Loaded Successfully"
+      echo "============================================="
+      echo "Component: ${{ inputs.component-name }}"
+      echo "Library Type: ${{ inputs.library-type }}"
+      echo "Environment: ${{ inputs.environment }}"
+      echo "Config Repo: ${{ inputs.dso-workflows-configs-repo }}"
+      echo ""
+      echo "🔧 Loaded configuration paths (in order):"
+      echo "  1. global-variables/common.yaml"
+      echo "  2. cnf-mobile/libraries-variables/default.yaml"
+      echo "  3. cnf-mobile/flags/flags-default.yaml"
+      echo "  4. cnf-mobile/flags/${{ inputs.component-name }}.yaml"
+      echo "  5. cnf-mobile/libraries-variables/${{ inputs.library-type }}/${{ inputs.environment }}/default.yaml"
+      echo "  6. cnf-mobile/libraries-variables/${{ inputs.library-type }}/${{ inputs.environment }}/${{ inputs.component-name }}.yaml"
+      echo ""
+      echo "✅ Config-driven architecture: Tech/Environment separation enabled"

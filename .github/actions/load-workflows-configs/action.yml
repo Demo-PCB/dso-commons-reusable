@@ -1,0 +1,330 @@
+name: Load Workflows Configs
+description: "Action to load workflow configurations and environment variables from a specified repository."
+inputs:
+  application:
+    description: 'Application name to load configurations for'
+    required: true
+    type: string
+  component-name:
+    description: 'Component name to load specific flags'
+    required: true
+    type: string
+  environment:
+    description: 'Target environment (dev, uat, stg, prd)'
+    required: false
+    type: string
+    default: ''
+  dso-ghe-app-id:
+    description: 'GitHub App ID for authentication'
+    required: true
+  dso-ghe-private-key:
+    description: 'GitHub App Private Key for authentication'
+    required: true
+  dso-workflows-configs-repo:
+    description: 'Repository containing the workflow configurations'
+    required: false
+    type: string
+  dso-workflows-configs-repo-owner:
+    description: ''
+    required: true
+    type: string
+  dso-deployment-repo:
+    description: ''
+    required: false
+    type: string
+  dso-deployment-repo-owner:
+    description: ''
+    required: false
+    type: string
+  dso-app-repo-owner:
+    description: ''
+    required: true
+    type: string
+  dso-solution-type:
+    description: ''
+    default: ''
+    required: false
+    type: string
+  dso-resource-type:
+    description: ''
+    required: false
+    type: string
+runs:
+  using: 'composite'
+  steps:
+  ## Authenticate and checkout the workflows configs repository
+  - uses: actions/create-github-app-token@v2
+    id: app-token-config-global
+    with:
+      app-id: ${{ inputs.dso-ghe-app-id }}
+      private-key: ${{ inputs.dso-ghe-private-key }}
+      repositories: |
+        ${{ inputs.dso-workflows-configs-repo }}
+      owner: ${{ inputs.dso-workflows-configs-repo-owner }}
+  
+  - uses: actions/create-github-app-token@v2
+    id: app-token-config
+    with:
+      app-id: ${{ inputs.dso-ghe-app-id }}
+      private-key: ${{ inputs.dso-ghe-private-key }}
+      repositories: |
+        dso-${{ inputs.application }}-workflows-configs
+      owner: ${{ inputs.dso-app-repo-owner }}
+    continue-on-error: true  
+    
+  ## Checkout global workflows configs repo with sparse checkout
+  - uses: actions/checkout@v5
+    with:
+      token: ${{ steps.app-token-config-global.outputs.token }}
+      ref: main
+      repository: ${{ inputs.dso-workflows-configs-repo-owner }}/${{ inputs.dso-workflows-configs-repo }}
+      path: ${{ inputs.dso-workflows-configs-repo }}
+      persist-credentials: false
+      fetch-depth: 1
+      sparse-checkout-cone-mode: true
+      sparse-checkout: |
+        ${{ inputs.application }}
+        global-variables
+        global-configurations
+
+  ## Checkout application specific workflows configs repo
+  - uses: actions/checkout@v5
+    if: ${{ steps.app-token-config.outputs.token != '' }}
+    with:
+      token: ${{ steps.app-token-config.outputs.token }}
+      ref: main
+      repository: ${{ inputs.dso-app-repo-owner }}/dso-${{ inputs.application }}-workflows-configs
+      path: dso-${{ inputs.application }}-workflows-configs
+      fetch-depth: 0
+    continue-on-error: true
+
+  # Load global Environment Variables and Application Specific Variables
+  - name: Load Environment Variables
+    uses: marvin-lorenzo-ntt/dso-commons-reusable/.github/actions/load-env-from-yaml@main
+    with:
+      yaml-path: |
+        
+        ## Global configs by repository
+        ${{ inputs.dso-workflows-configs-repo }}/global-variables/common.yaml
+        ${{ inputs.dso-workflows-configs-repo }}/${{ inputs.application }}/variables/default.yaml
+        ${{ inputs.dso-workflows-configs-repo }}/${{ inputs.application }}/flags/default.yaml
+        ${{ inputs.dso-workflows-configs-repo }}/${{ inputs.application }}/flags/${{ inputs.component-name }}.yaml
+
+        ## Application specific configs by repository
+        dso-${{ inputs.application }}-workflows-configs/variables/default.yaml
+        dso-${{ inputs.application }}-workflows-configs/flags/default.yaml
+        dso-${{ inputs.application }}-workflows-configs/flags/${{ inputs.component-name }}.yaml
+
+        # v2 support for global configs by repository
+        ${{ inputs.dso-workflows-configs-repo }}/${{ inputs.application }}/${{inputs.dso-solution-type}}/variables/default.yaml
+        ${{ inputs.dso-workflows-configs-repo }}/${{ inputs.application }}/${{inputs.dso-solution-type}}/flags/default.yaml
+        ${{ inputs.dso-workflows-configs-repo }}/${{ inputs.application }}/${{inputs.dso-solution-type}}/flags/${{ inputs.component-name }}.yaml        
+
+        # # v2 support for resource type specific configs
+        # dso-${{ inputs.application }}-workflows-configs/${{inputs.dso-solution-type}}/variables/default.yaml
+        # dso-${{ inputs.application }}-workflows-configs/${{inputs.dso-solution-type}}/flags/default.yaml
+        # dso-${{ inputs.application }}-workflows-configs/${{inputs.dso-solution-type}}/flags/${{ inputs.component-name }}.yaml
+        
+
+  - name: Load Environment Variables from Environment
+    if: ${{ inputs.environment != ''}}
+    uses: marvin-lorenzo-ntt/dso-commons-reusable/.github/actions/load-env-from-yaml@main
+    with:
+      yaml-path: |
+        ## Global configs by repository
+        ${{ inputs.dso-workflows-configs-repo }}/variables/${{ inputs.environment }}/default.yaml
+        ${{ inputs.dso-workflows-configs-repo }}/variables/${{ inputs.environment }}/${{ inputs.component-name }}.yaml
+        ${{ inputs.dso-workflows-configs-repo }}/variables/${{ inputs.environment }}/default.${{inputs.dso-resource-type}}.yaml
+        
+        ${{ inputs.dso-workflows-configs-repo }}/${{ inputs.application }}/variables/${{ inputs.environment }}/${{ inputs.component-name }}.yaml
+        ${{ inputs.dso-workflows-configs-repo }}/${{ inputs.application }}/variables/${{ inputs.environment }}/default.${{inputs.dso-resource-type}}.yaml
+        ${{ inputs.dso-workflows-configs-repo }}/${{ inputs.application }}/variables/${{ inputs.environment }}/default.yaml
+
+        # ## Application specific configs by repository
+        # dso-${{ inputs.application }}-workflows-configs/${{inputs.dso-solution-type}}/variables/${{ inputs.environment }}/default.yaml
+        # dso-${{ inputs.application }}-workflows-configs/${{inputs.dso-solution-type}}/variables/${{ inputs.environment }}/${{ inputs.component-name }}.yaml
+        # dso-${{ inputs.application }}-workflows-configs/${{inputs.dso-solution-type}}/variables/${{ inputs.environment }}/default.${{inputs.dso-resource-type}}.yaml
+
+        # # v2 support for global configs by repository
+        # ${{ inputs.dso-workflows-configs-repo }}/${{ inputs.application }}/${{inputs.dso-solution-type}}/variables/${{ inputs.environment }}/default.yaml
+        # ${{ inputs.dso-workflows-configs-repo }}/${{ inputs.application }}/${{inputs.dso-solution-type}}/variables/${{ inputs.environment }}/${{ inputs.component-name }}.yaml
+        # ${{ inputs.dso-workflows-configs-repo }}/${{ inputs.application }}/${{inputs.dso-solution-type}}/variables/${{ inputs.environment }}/default.${{inputs.dso-resource-type}}.yaml
+
+        # # v2 support for resource type specific configs
+        # dso-${{ inputs.application }}-workflows-configs/${{inputs.dso-solution-type}}/variables/${{ inputs.environment }}/default.yaml
+        # dso-${{ inputs.application }}-workflows-configs/${{inputs.dso-solution-type}}/variables/${{ inputs.environment }}/${{ inputs.component-name }}.yaml
+        # dso-${{ inputs.application }}-workflows-configs/${{inputs.dso-solution-type}}/variables/${{ inputs.environment }}/default.${{inputs.dso-resource-type}}.yaml
+
+
+  - uses: actions/create-github-app-token@v2
+    id: app-token-deployment
+    if: ${{ inputs.dso-deployment-repo != '' && inputs.environment != '' }}
+    with:
+      app-id: ${{ inputs.dso-ghe-app-id }}
+      private-key: ${{ inputs.dso-ghe-private-key }}
+      repositories: ${{ inputs.dso-deployment-repo }}
+      owner: ${{ inputs.dso-deployment-repo-owner }}
+    continue-on-error: true
+
+  - name: Clone Application Deployment Repo
+    uses: actions/checkout@v5
+    if: ${{ inputs.dso-deployment-repo != '' && inputs.environment != '' && steps.app-token-deployment.outputs.token != '' }}
+    with:
+      token: ${{ steps.app-token-deployment.outputs.token }}
+      ref: main
+      repository: ${{ inputs.dso-deployment-repo-owner }}/${{ inputs.dso-deployment-repo }}
+      path: ${{ inputs.dso-deployment-repo }}
+      
+
+  - name: Show tree of loaded configs
+    run: |
+      echo "Directory structure:"
+      if command -v tree >/dev/null 2>&1; then
+        tree .
+      else
+        find . -type d | sed 's|[^/]*/|  |g' | head -20
+        echo "Files:"
+        find . -type f | head -10
+      fi
+    shell: bash
+      
+
+
+
+
+######### BACKUP
+
+
+# name: Load Workflows Configs
+# description: "Action to load workflow configurations and environment variables from a specified repository."
+# inputs:
+#   application:
+#     description: 'Application name to load configurations for'
+#     required: true
+#     type: string
+#   component-name:
+#     description: 'Component name to load specific flags'
+#     required: true
+#     type: string
+#   environment:
+#     description: 'Target environment (dev, uat, stg, prd)'
+#     required: false
+#     type: string
+#     default: ''
+#   dso-ghe-app-id:
+#     description: 'GitHub App ID for authentication'
+#     required: true
+#   dso-ghe-private-key:
+#     description: 'GitHub App Private Key for authentication'
+#     required: true
+#   dso-workflows-configs-repo:
+#     description: 'Repository containing the workflow configurations'
+#     required: false
+#     type: string
+#   dso-workflows-configs-repo-owner:
+#     description: ''
+#     required: true
+#     type: string
+#   dso-deployment-repo:
+#     description: ''
+#     required: true
+#     type: string
+#   dso-deployment-repo-owner:
+#     description: ''
+#     required: true
+#     type: string
+# runs:
+#   using: 'composite'
+#   steps:
+#   ## Authenticate and checkout the workflows configs repository
+#   - uses: actions/create-github-app-token@v2
+#     id: app-token-config
+#     with:
+#       app-id: ${{ inputs.dso-ghe-app-id }}
+#       private-key: ${{ inputs.dso-ghe-private-key }}
+#       repositories: |
+#         ${{ inputs.dso-workflows-configs-repo }}
+#         dso-${{ inputs.application }}-workflows-configs
+#       owner: ${{ inputs.dso-workflows-configs-repo-owner }}
+
+#   ## Checkout global workflows configs repo with sparse checkout
+#   - uses: actions/checkout@v5
+#     with:
+#       token: ${{ steps.app-token-config.outputs.token }}
+#       ref: main
+#       repository: ${{ inputs.dso-workflows-configs-repo-owner }}/${{ inputs.dso-workflows-configs-repo }}
+#       path: ${{ inputs.dso-workflows-configs-repo }}
+#       persist-credentials: false
+#       fetch-depth: 0
+#       sparse-checkout: |
+#         ${{ inputs.application }}
+#         global-variables
+#         global-configurations
+
+#   ## Checkout application specific workflows configs repo
+#   - uses: actions/checkout@v5
+#     with:
+#       token: ${{ steps.app-token-config.outputs.token }}
+#       ref: main
+#       repository: ${{ inputs.dso-workflows-configs-repo-owner }}/dso-${{ inputs.application }}-workflows-configs
+#       path: dso-${{ inputs.application }}-workflows-configs
+#       fetch-depth: 0
+#     continue-on-error: true
+
+#   # Load global Environment Variables and Application Specific Variables
+#   - name: Load Environment Variables
+#     uses: marvin-lorenzo-ntt/dso-commons-reusable/.github/actions/load-env-from-yaml@main
+#     with:
+#       yaml-path: |
+#         ${{ inputs.dso-workflows-configs-repo }}/global-variables/common.yaml
+        
+#         dso-${{ inputs.application }}-workflows-configs/variables/default.yaml
+#         dso-${{ inputs.application }}-workflows-configs/flags/default.yaml
+#         dso-${{ inputs.application }}-workflows-configs/flags/${{ inputs.component-name }}.yaml
+        
+
+#   - name: Load Environment Variables from Environment
+#     if: ${{ inputs.environment != '' }}
+#     uses: marvin-lorenzo-ntt/dso-commons-reusable/.github/actions/load-env-from-yaml@main
+#     with:
+#       yaml-path: |
+#          dso-${{ inputs.application }}-workflows-configs/variables/cloud/${{env.CLOUD}}/regions/${{env.REGION}}/${{ inputs.environment }}/default.yaml
+#          dso-${{ inputs.application }}-workflows-configs/variables/cloud/${{env.CLOUD}}/regions/${{env.REGION}}/${{ inputs.environment }}/${{ inputs.component-name }}.yaml
+
+#   - name: Load Environment Variables from Environment MULTIREGION
+#     if: ${{ inputs.environment == env.MULTI_REGION_ENV_1 }}
+#     uses: marvin-lorenzo-ntt/dso-commons-reusable/.github/actions/load-env-from-yaml@main
+#     with:
+#       yaml-path: |
+#          dso-${{ inputs.application }}-workflows-configs/variables/cloud/${{env.CLOUD}}/regions/${{env.MULTI_REGION_NAME_1}}/${{ inputs.environment }}/${{ inputs.component-name }}.yaml
+
+#   - uses: actions/create-github-app-token@v2
+#     id: app-token-deployment
+#     if: ${{ inputs.dso-deployment-repo != '' && inputs.environment != '' }}
+#     with:
+#       app-id: ${{ inputs.dso-ghe-app-id }}
+#       private-key: ${{ inputs.dso-ghe-private-key }}
+#       repositories: ${{ inputs.dso-deployment-repo }}
+#       owner: ${{ inputs.dso-deployment-repo-owner }}
+
+#   - name: Clone Application Deployment Repo
+#     uses: actions/checkout@v5
+#     if: ${{ inputs.dso-deployment-repo != '' && inputs.environment != '' }}
+#     with:
+#       token: ${{ steps.app-token-deployment.outputs.token }}
+#       ref: main
+#       repository: ${{ inputs.dso-deployment-repo-owner }}/${{ inputs.dso-deployment-repo }}
+#       path: ${{ inputs.dso-deployment-repo }}
+
+#   - name: Show tree of loaded configs
+#     run: |
+#       echo "Directory structure:"
+#       if command -v tree >/dev/null 2>&1; then
+#         tree .
+#       else
+#         find . -type d | sed 's|[^/]*/|  |g' | head -20
+#         echo "Files:"
+#         find . -type f | head -10
+#       fi
+#     shell: bash
+      

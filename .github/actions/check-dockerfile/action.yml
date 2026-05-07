@@ -1,0 +1,22 @@
+inputs:
+  dockerfile:
+    required: false
+    type: string
+    default: 'Dockerfile'
+outputs:
+  isdockerfile:
+    value: ${{steps.checkdockerfile.outputs.isdockerfile}}
+runs:
+  using: "composite"
+  steps:
+    - name: Dockerfile Check
+      id: checkdockerfile
+      run: |
+        # If dockerfile not present fail 
+        echo "isdockerfile=true" >> $GITHUB_OUTPUT 
+        if [ ! -f "${{ inputs.dockerfile }}" ]; then
+          # Display Github message
+          echo "isdockerfile=false" >> $GITHUB_OUTPUT 
+          echo "::error::El dockerfile '${{ inputs.dockerfile }}' no existe en el repositorio. Corrija la ruta o quite la entrada si no es una aplicación dockerizada."
+        fi
+      shell: bash

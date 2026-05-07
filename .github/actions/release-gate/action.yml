@@ -1,0 +1,299 @@
+name: 'Release Gate (artifact graph against release-only)'
+description: 'Valida que el artefacto en RC resuelva completo contra el repo de release (sin snapshots) y que no use SNAPSHOT/versions dinámicas'
+author: 'DSO Team'
+
+inputs:
+  artifactory_url:
+    description: 'Base Artifactory URL (incluye /artifactory). Ej: https://artifactoryibk.jfrog.io/artifactory'
+    required: true
+  rc_repo:
+    description: 'Repositorio RC (ej: mmp-mvn-rc)'
+    required: true
+  release_repo:
+    description: 'Repositorio Release (ej: mmp-mvn-release)'
+    required: true
+  component_name:
+    description: 'Nombre lógico (solo logging)'
+    required: true
+  version:
+    description: 'Versión a promover'
+    required: true
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Install JFrog CLI
+      uses: jfrog/setup-jfrog-cli@v4
+      with:
+        disable-auto-build-publish: true
+        disable-job-summary: false
+
+    # 1) Ubicar el POM en RC
+    - name: Locate POM in RC
+      id: locate
+      shell: bash
+      env:
+        AF_URL: ${{ inputs.artifactory_url }}
+        RC_REPO: ${{ inputs.rc_repo }}
+        VERSION: ${{ inputs.version }}
+        ARTIFACTORY_TOKEN: ${{ env.ARTIFACTORY_TOKEN }}
+      run: |
+        set -euo pipefail
+        echo "🔎 Buscando POM en ${RC_REPO} para versión ${VERSION}…"
+        export JFROG_CLI_FORMAT=json
+        export JFROG_CLI_LOG_LEVEL=ERROR
+        OUT=$(jf rt s "${RC_REPO}/**/*-${VERSION}.pom" --url="$AF_URL" --access-token="$ARTIFACTORY_TOKEN" --sort-by created --sort-order desc --limit 1 || true)
+        if [ -z "${OUT:-}" ]; then
+          echo "❌ No se encontró POM en RC para versión ${VERSION}"; exit 1
+        fi
+        PATH_POM=$(printf '%s' "$OUT" | jq -r 'if type=="array" then (.[0].path // .[0]) elif type=="object" then (.path) else . end')
+        if [ -z "${PATH_POM:-}" ] || [ "${PATH_POM}" = "null" ]; then
+          echo "❌ No se encontró POM en RC para versión ${VERSION}"; exit 1
+        fi
+        echo "POM_PATH=${PATH_POM}" >> "$GITHUB_OUTPUT"
+        echo "✅ POM path: ${PATH_POM}"
+
+    # 2) Descargar y extraer coords
+    - name: Download & parse POM (groupId/artifactId)
+      id: coords
+      shell: bash
+      env:
+        AF_URL: ${{ inputs.artifactory_url }}
+        ARTIFACTORY_TOKEN: ${{ env.ARTIFACTORY_TOKEN }}
+        POM_PATH: ${{ steps.locate.outputs.POM_PATH }}
+      run: |
+        set -euo pipefail
+        mkdir -p gate-tmp
+        jf rt dl "$POM_PATH" gate-tmp/ --url="$AF_URL" --access-token="$ARTIFACTORY_TOKEN" --flat=true >/dev/null
+        POM_FILE=$(ls gate-tmp/*.pom | head -n1 || true)
+        if [ -z "${POM_FILE:-}" ]; then echo "❌ No pude descargar el POM desde: $POM_PATH"; exit 1; fi
+        GID=$(grep -m1 '<groupId>' "$POM_FILE" | sed 's/.*<groupId>\(.*\)<\/groupId>.*/\1/' | xargs || true)
+        AID=$(grep -m1 '<artifactId>' "$POM_FILE" | sed 's/.*<artifactId>\(.*\)<\/artifactId>.*/\1/' | xargs || true)
+        if [ -z "$GID" ] || [ -z "$AID" ]; then echo "❌ No pude extraer groupId/artifactId del POM ($POM_FILE)"; exit 1; fi
+        echo "group_id=$GID"    >> "$GITHUB_OUTPUT"
+        echo "artifact_id=$AID" >> "$GITHUB_OUTPUT"
+        echo "✅ Coords: $GID:$AID:${{ inputs.version }}"
+
+    # 3) Toolchain
+    - name: Setup JDK + Gradle
+      uses: actions/setup-java@v5
+      with:
+        java-version: '21'
+        distribution: 'temurin'
+    - name: Setup Gradle
+      uses: gradle/actions/setup-gradle@v4
+
+    # 4) Generar e INSTALAR el init-script en ~/.gradle/init.d  (afecta a buildSrc también)
+    - name: Install global init script (applies to buildSrc)
+      id: prep
+      shell: bash
+      env:
+        AF_URL: ${{ inputs.artifactory_url }}
+        RELEASE_REPO: ${{ inputs.release_repo }}
+        GRADLE_USER_HOME: ${{ env.GRADLE_USER_HOME }}
+      run: |
+        set -euo pipefail
+        HOST=$(echo "$AF_URL" | sed -E 's|^https?://([^/]+)/?.*|\1|')
+        if [ -z "$HOST" ]; then echo "❌ No pude derivar ARTIFACTORY_HOST desde $AF_URL"; exit 1; fi
+
+        echo "ARTIFACTORY_HOST=$HOST" >> "$GITHUB_ENV"
+        echo "RELEASE_REPO_PATH=artifactory/${RELEASE_REPO}/" >> "$GITHUB_ENV"
+
+        mkdir -p "${GRADLE_USER_HOME}/init.d"
+        INIT_PATH="${GRADLE_USER_HOME}/init.d/99-releaseGate.init.gradle.kts"
+
+        cat > "$INIT_PATH" <<'KTS'
+        import org.gradle.api.artifacts.repositories.MavenArtifactRepository
+        import org.gradle.api.credentials.HttpHeaderCredentials
+        import org.gradle.authentication.http.HttpHeaderAuthentication
+
+        val artifactoryHost = System.getenv("ARTIFACTORY_HOST")
+        val releaseRepoPath = System.getenv("RELEASE_REPO_PATH")
+        val ibkGroupRegex = "pe\\.interbank\\..*"
+        val bearer = System.getenv("ARTIFACTORY_TOKEN") ?: ""
+
+        fun MavenArtifactRepository.ensureBearer(b: String) {
+            if (b.isBlank()) return
+            credentials(HttpHeaderCredentials::class.java) {
+                name = "Authorization"; value = "Bearer " + b
+            }
+            if (authentication.findByName("header") == null) {
+                authentication.create("header", HttpHeaderAuthentication::class.java)
+            }
+        }
+
+        settingsEvaluated {
+            // 🔹 buildSrc: repos mínimos y predecibles
+            if (settings.rootProject.name == "buildSrc") {
+                val drm = settings.dependencyResolutionManagement
+                drm.repositoriesMode.set(RepositoriesMode.PREFER_SETTINGS)
+                val r = drm.repositories
+                if (r.isEmpty()) {
+                    r.mavenCentral()
+                    r.maven { url = uri("https://plugins.gradle.org/m2") }
+                    // r.google() // si lo necesitas
+                }
+            }
+
+            // 🔹 normalización general de repos (incluye buildSrc si aplica)
+            val drm = settings.dependencyResolutionManagement
+            drm.repositoriesMode.set(RepositoriesMode.PREFER_SETTINGS)
+            val repos = drm.repositories
+
+            // 1) Reescribir cualquier repo snapshot del host → release
+            val toRemove = mutableListOf<MavenArtifactRepository>()
+            repos.withType(MavenArtifactRepository::class.java).forEach { r ->
+                val url = r.url.toString()
+                val hostMatches = artifactoryHost?.let { url.contains(it, ignoreCase = true) } ?: false
+                val isSnapshot = url.contains("mmp-mvn-snapshot", ignoreCase = true)
+                if (hostMatches && isSnapshot) {
+                    if (!releaseRepoPath.isNullOrBlank()) {
+                        r.setUrl(url.replace(Regex("mmp-mvn-snapshot/?", RegexOption.IGNORE_CASE), releaseRepoPath!!))
+                        r.mavenContent { releasesOnly() }
+                        r.ensureBearer(bearer)
+                    } else {
+                        toRemove += r
+                    }
+                }
+            }
+            toRemove.forEach { repos.remove(it) }
+
+            // 2) Declarar (o reutilizar) un repo fijo que apunte a mmp-mvn-release
+            val releaseBase = "https://${artifactoryHost}/${releaseRepoPath?.trimStart('/')}"
+            val releaseUri  = uri(releaseBase)
+            val ibkReleaseGate: MavenArtifactRepository =
+                repos.withType(MavenArtifactRepository::class.java)
+                    .firstOrNull { it.url == releaseUri }
+                    ?: repos.maven {
+                        name = "ibk-release-gate"
+                        url  = releaseUri
+                        mavenContent { releasesOnly() }
+                    }
+            ibkReleaseGate.ensureBearer(bearer)
+
+            // 3) Amarrar exclusivamente pe.interbank.* a ibk-release-gate
+            repos.exclusiveContent {
+                forRepositories(ibkReleaseGate)
+                filter { includeGroupByRegex(ibkGroupRegex) }
+            }
+        }
+
+        gradle.settingsEvaluated {
+            gradle.rootProject {
+                // Veto global a SNAPSHOT/dinámicas
+                configurations.configureEach {
+                    resolutionStrategy.componentSelection.all {
+                        val v = candidate.version ?: ""
+                        if (v.endsWith("-SNAPSHOT", true) || v == "+" || v.lowercase().startsWith("latest.")) {
+                            reject("Snapshots/dynamic versions are not allowed in release gate")
+                        }
+                    }
+                }
+
+                tasks.register("releaseGateCheck") {
+                    doLast {
+                        val projects = allprojects
+                        val unresolved = mutableListOf<String>()
+                        val forbidden  = mutableListOf<String>()
+
+                        projects.forEach { p ->
+                            val targets = p.configurations
+                                .matching { it.isCanBeResolved && it.name.endsWith("CompileClasspath") }
+
+                            targets.forEach { cfg ->
+                                val rr = cfg.incoming.resolutionResult
+
+                                // dependencias NO resueltas (FAILED)
+                                rr.allDependencies.forEach { d ->
+                                    if (d is org.gradle.api.artifacts.result.UnresolvedDependencyResult) {
+                                        val req = d.requested.displayName
+                                        val reason = d.failure?.message ?: "unresolved"
+                                        unresolved += "${p.path}:${cfg.name}: $req -> $reason"
+                                    }
+                                }
+
+                                // detectar SNAPSHOT/dinámicas si se colaran
+                                rr.allComponents.forEach { c ->
+                                    val disp = c.id.displayName
+                                    val ver  = disp.substringAfterLast(':', "")
+                                    val v    = ver.lowercase()
+                                    if (ver == "+" || v.startsWith("latest.") || v.endsWith("-snapshot")) {
+                                        forbidden += "${p.path}:${cfg.name}: $disp"
+                                    }
+                                }
+                            }
+                        }
+
+                        if (unresolved.isNotEmpty() || forbidden.isNotEmpty()) {
+                            logger.error("❌ Gate violations detectadas:")
+                            if (unresolved.isNotEmpty()) {
+                                logger.error("  • No resueltas:")
+                                unresolved.forEach { logger.error("    - $it") }
+                            }
+                            if (forbidden.isNotEmpty()) {
+                                logger.error("  • Versiones prohibidas (SNAPSHOT/dinámicas):")
+                                forbidden.forEach { logger.error("    - $it") }
+                            }
+                            throw RuntimeException("Gate falló: corrige dependencias antes de promover a Release")
+                        } else {
+                            logger.lifecycle("✅ Grafo OK en todos los módulos")
+                        }
+                    }
+                }
+            }
+        }
+        KTS
+
+        echo "✅ Init script instalado en ${INIT_PATH}"
+
+    # 5) Ejecutar el gate (ya no hace falta -I)
+    - name: Run release gate (resolve with release-only)
+      shell: bash
+      env:
+        ARTIFACTORY_TOKEN: ${{ env.ARTIFACTORY_TOKEN }}
+        PLUSTI_USERNAME:   ${{ env.PLUSTI_USERNAME }}
+        PLUSTI_PASSWORD:   ${{ env.PLUSTI_PASSWORD }}
+        MAIN_MODULE:       ${{ env.MAIN_MODULE }}   # <- viene de "Load Library Configurations"
+      run: |
+        set -euo pipefail
+        if [ -f ./gradlew ]; then chmod +x ./gradlew; fi
+
+        # Normaliza el path del módulo (":modulo"); si no hay, no forzamos módulo
+        MOD="${MAIN_MODULE:-}"
+        if [ -n "$MOD" ] && [[ "$MOD" != :* ]]; then MOD=":${MOD}"; fi
+
+        # Previsualización del grafo SOLO si tenemos módulo
+        # Probamos configuraciones típicas según el tipo de proyecto
+        if [ -n "$MOD" ]; then
+          echo "🔎 Módulo principal: $MOD"
+          tried=0; ok=0
+
+          try_cfg () {
+            local cfg="$1"
+            tried=$((tried+1))
+            echo "→ dependencies $MOD --configuration $cfg"
+            if ./gradlew -PRESOLVE_MODE=release-only -q "$MOD:dependencies" --configuration "$cfg"; then
+              ok=1
+            fi
+          }
+
+          # Android (library/app)
+          try_cfg "releaseCompileClasspath" || true
+          # Android debug (por si no hay release)
+          if [ $ok -eq 0 ]; then try_cfg "debugCompileClasspath" || true; fi
+          # Kotlin/Java puros
+          if [ $ok -eq 0 ]; then try_cfg "compileClasspath" || true; fi
+          # Último intento: test
+          if [ $ok -eq 0 ]; then try_cfg "testCompileClasspath" || true; fi
+
+          if [ $ok -eq 0 ]; then
+            echo "⚠️  No encontré una configuration de *CompileClasspath* válida en $MOD; continuo con el gate global."
+          fi
+        else
+          echo "ℹ️  MAIN_MODULE no definido; salto la previsualización y voy directo al gate global."
+        fi
+
+        # Gate real: recorre todos los subproyectos y falla ante unresolved/SNAPSHOT/dynamic
+        ./gradlew -PRESOLVE_MODE=release-only -q releaseGateCheck
+
+        echo "✅ Release gate OK"

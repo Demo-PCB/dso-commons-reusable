@@ -1,0 +1,80 @@
+name: "Generating Predicate"
+description: "Action for generate json predicate"
+
+inputs:
+  predicate-path:
+    required: true
+  github-token:
+    required: false
+runs:
+  using: "composite"
+  steps:
+      - name: Init approvers (default empty)
+        if: ${{ env.ENVIRONMENT == 'dev'}}
+        shell: bash
+        run: |
+          echo 'APPROVERS=[]' >> $GITHUB_ENV
+
+      - name: Get approvers for UAT/STG
+        if: ${{ env.ENVIRONMENT != 'dev' && env.ENVIRONMENT != '' }}
+        shell: bash
+        run: |
+          RESPONSE=$(curl -s \
+            -H "Authorization: Bearer ${{ inputs.github-token }}" \
+            -H "Accept: application/vnd.github+json" \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/approvals")
+
+          APPROVERS=$(echo "$RESPONSE" | jq '[.[] | select(.state=="approved") | .user.login]')
+
+          echo "APPROVERS=$APPROVERS" >> $GITHUB_ENV
+
+      - name: Prepare Predicate Json
+        if: ${{env.ENVIRONMENT==''}}
+        shell: bash
+        run: |
+          sonarcloud=${{env.FLAG_RUN_SONAR_SCAN}}
+          repository=${{ github.repository }}
+          sha=${{ github.sha }}
+          export TZ=America/Lima
+          timestamp=$(date +%s)
+          echo "predicate_repository=$repository" >> $GITHUB_ENV
+          echo "predicate_sha=$sha" >> $GITHUB_ENV
+          echo "sonarcloud=$sonarcloud">> $GITHUB_ENV
+          echo "predicate_timestamp=$timestamp" >> $GITHUB_ENV
+      - uses: qetza/replacetokens-action@v1
+        if: ${{env.ENVIRONMENT==''}}
+        with:
+          missing-var-log: 'off'
+          sources: ${{inputs.predicate-path}}
+          token-pattern: custom
+          token-prefix: '#{'
+          token-suffix: '}'
+          variables: ${{toJson(env)}}
+      # Update predicate JSON
+      # ===============================
+      - name: Update predicate json
+        if:  ${{ env.ENVIRONMENT != '' }}
+        shell: bash
+        run: |
+        
+          ENV_UPPER=$(echo "${{env.ENVIRONMENT}}" | tr '[:lower:]' '[:upper:]')
+
+          jq \
+            --arg env "$ENV_UPPER" \
+            --argjson deployed true \
+            --argjson approvers "${APPROVERS:-[]}" \
+            --arg runid "$GITHUB_RUN_ID" \
+            --arg workflow_url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            '
+            .predicate.Data |= (
+              fromjson
+              | .[$env].deployed = $deployed
+              | .[$env].approvers = $approvers
+              | .[$env].runid = $runid
+              | .[$env].workflow_url = $workflow_url
+              | tojson
+            )
+            ' "${{ inputs.predicate-path }}" > predicate.tmp.json
+
+          mv predicate.tmp.json "${{ inputs.predicate-path }}"
+

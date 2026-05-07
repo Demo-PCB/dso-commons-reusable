@@ -1,0 +1,72 @@
+name: 'Trivy SCA Gate'
+description: 'Run Trivy dependency scanning (SCA) as PR gate con Trivy'
+author: 'IBK DevSecOps'
+
+inputs:
+  # Directorio a escanear (por defecto el repo raíz)
+  working-directory:
+    description: 'Path relativo a escanear'
+    required: false
+    default: '.'
+
+  # Severidad mínima que rompe el build
+  severity:
+    description: 'Lista de severidades que fallan el job'
+    required: false
+    default: 'CRITICAL,HIGH'
+
+  # Ignorar vulnerabilidades sin fix
+  ignore-unfixed:
+    description: 'Si se ignoran vulnerabilidades sin fix'
+    required: false
+    default: 'true'
+
+  # Versión de Trivy (tag de la imagen docker)
+  trivy-version:
+    description: 'Versión de la imagen docker aquasec/trivy'
+    required: false
+    default: 'latest'
+
+  # Args adicionales para casos avanzados (OPA, policies, etc.)
+  extra-args:
+    description: 'Argumentos extra para Trivy'
+    required: false
+    default: ''
+
+runs:
+  using: 'composite'
+  steps:
+    - name: '🔧 Prepare Trivy cache dir'
+      shell: bash
+      run: |
+        set -euo pipefail
+        mkdir -p "$HOME/.cache/trivy"
+
+    - name: '🔍 Run Trivy FS (SCA)'
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        WORKDIR="${{ inputs.working-directory }}"
+        SEVERITY="${{ inputs.severity }}"
+        IGNORE_UNFIXED="${{ inputs.ignore-unfixed }}"
+        TRIVY_VERSION="${{ inputs.trivy-version }}"
+        EXTRA_ARGS="${{ inputs.extra-args }}"
+
+        echo "📁 Working dir: $WORKDIR"
+        echo "🚦 Fail on severities: $SEVERITY"
+        echo "🔕 Ignore unfixed: $IGNORE_UNFIXED"
+        echo "🐳 Trivy image: aquasec/trivy:${TRIVY_VERSION}"
+
+        cd "$GITHUB_WORKSPACE/$WORKDIR"
+
+        # Base invocation with common flags only; scanners/pkg-types are passed via EXTRA_ARGS per ecosystem
+        docker run --rm \
+          -v "$PWD":/src \
+          -v "$HOME/.cache/trivy":/root/.cache \
+          aquasec/trivy:"${TRIVY_VERSION}" fs /src \
+            --exit-code 1 \
+            --severity "${SEVERITY}" \
+            --ignore-unfixed="${IGNORE_UNFIXED}" \
+            --format table \
+            ${EXTRA_ARGS}

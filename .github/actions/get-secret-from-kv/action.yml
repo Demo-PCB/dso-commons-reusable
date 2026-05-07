@@ -1,0 +1,40 @@
+name: 'extractSecretFromAzKv'
+description: 'Extrae secretos de Azure Key Vault y los exporta a variables de entorno'
+
+inputs:
+  secrets:
+    description: "Lista de secretos a obtener del Azure Key Vault (separados por espacio)"
+    required: true
+    type: string
+  keyvault_name:
+    description: "Nombre del Azure Key Vault"
+    required: true
+    type: string
+  subscription_id:
+    description: "Subscription Id del KV"
+    required: true
+    type: string
+runs:
+  using: "composite"
+  steps:
+    - name: Extraer secretos desde Azure Key Vault
+      shell: bash
+      run: |
+        echo "Extrayendo secretos de ${{ inputs.keyvault_name }}..."
+        secrets=(
+          "${{ inputs.secrets }}"
+        )
+        for secret in "${secrets[@]}"; do
+          echo "Obteniendo secreto: $secret"
+          value=$(az keyvault secret show \
+            --name "$secret" \
+            --vault-name "${{ inputs.keyvault_name }}" \
+            --subscription "${{ inputs.subscription_id }}" \
+            --query "value" -o tsv)
+
+          # Ocultar el valor en los logs
+          echo "::add-mask::$value"
+
+          # Exportar a variables de entorno
+          echo "$secret=$value" >> $GITHUB_ENV
+        done

@@ -1,0 +1,73 @@
+inputs:
+  application:
+    description: "Application name"
+    required: true
+    type: string
+  sonar-project-name:
+    description: "Sonar Project Name"
+    required: true
+    type: string
+  sonar-cloud-token:
+    description: "Sonar Cloud Token"
+    required: true
+    type: string
+  version:
+    description: "Version"
+    required: true
+    type: string
+  github-token:
+    description: "Github Token"
+    required: true
+    type: string
+runs:
+  using: "composite"
+  steps:
+      - name: SonarCloud Scan add permanent exclusions
+        if: ${{ env.FLAG_RUN_SONAR_SCAN != 'false' }}
+        shell: bash
+        run: |
+
+          permanentSonarExclusions=".github/**,devops/**,README.md,docs/**,*.env"
+
+          if [ -f sonar-project.properties ]; then
+            echo "Appending permanent exclusions to existing sonar-project.properties"
+            # Read existing exclusions if any
+            existingExclusions=$(grep 'sonar.exclusions=' sonar-project.properties | cut -d'=' -f2-)
+
+            # Combine with permanent exclusions
+            if [ -n "$existingExclusions" ]; then
+              combinedExclusions="$existingExclusions,$permanentSonarExclusions"
+            else
+              combinedExclusions="$permanentSonarExclusions"
+            fi
+
+            # Update the properties file
+            sed -i "/sonar.exclusions=/c\sonar.exclusions=$combinedExclusions" sonar-project.properties || echo "sonar.exclusions=$combinedExclusions" >> sonar-project.properties
+
+          else
+            echo "sonar.exclusions=$permanentSonarExclusions" > sonar-project.properties
+          fi
+
+      - name: SonarCloud Scan
+        uses: SonarSource/sonarqube-scan-action@v6.0.0
+        if: ${{ env.FLAG_RUN_SONAR_SCAN != 'false' }}
+        env:
+          GITHUB_TOKEN: ${{ inputs.github-token }}
+          SONAR_TOKEN: ${{inputs.sonar-cloud-token}} 
+        with:
+          args: >
+            -Dsonar.projectKey="${{ inputs.sonar-project-name }}"
+            -Dsonar.organization="${{ env.IBK_SONARCLOUD_ORG }}"
+            -Dsonar.projectVersion="${{ inputs.version }}"
+            -Dsonar.links.ci="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            -Dsonar.links.scm="${{ github.server_url }}/${{ github.repository }}"
+            -Dsonar.sources=src
+            -Dsonar.tests=tests
+            -Dsonar.javascript.lcov.reportPaths=coverage/lcov.info
+            -Dsonar.testExecutionReportPaths=reports/junit/js-test-results.xml
+
+      - name: SonarQube Quality Gate Check
+        if: ${{ env.FLAG_RUN_SONAR_QG != 'false' }}
+        uses: sonarsource/sonarqube-quality-gate-action@master
+        env:
+          SONAR_TOKEN: ${{inputs.sonar-cloud-token}} 

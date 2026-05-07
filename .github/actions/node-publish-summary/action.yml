@@ -1,0 +1,150 @@
+inputs:
+  application:
+    description: "Application name"
+    required: true
+    type: string
+
+  component-name:
+    description: "Component name"
+    required: true
+    type: string
+
+  packagejson-version:
+    description: "Version from package.json"
+    required: true
+    type: string
+
+  packaging:
+    description: "Packaging type (jar, tar.gz, docker, etc)"
+    required: true
+    type: string
+
+  group-id:
+    description: "Group ID"
+    required: true
+    type: string
+
+  artifact-name:
+    description: "Artifact name"
+    required: true
+    type: string
+
+  node-version:
+    description: "Node version"
+    required: true
+    type: string
+
+  commit-sha:
+    description: "Commit SHA"
+    required: true
+    type: string
+
+  publish-artifacts:
+    description: "Whether artifacts were published"
+    required: false
+    default: "false"
+    type: string
+
+  artifactory-build-name:
+    description: "Artifactory build name"
+    required: false
+    type: string
+
+  artifactory-build-number:
+    description: "Artifactory build number"
+    required: false
+    type: string
+
+  dockerfile:
+    description: "Path to Dockerfile (empty if not used)"
+    required: false
+    default: ""
+    type: string
+
+  version:
+    description: "Application version"
+    required: true
+    type: string
+
+  prepare-result:
+    description: "Result Prepare"
+    required: true
+    type: string
+
+  build-result:
+    description: "Result build "
+    required: true
+    type: string
+
+  publish-artifact-result:
+    description: "Result publish artifact"
+    required: true
+    type: string
+
+  build-publish-docker-result:
+    description: "Result build publish docker"
+    required: true
+    type: string
+runs:
+  using: "composite"
+  steps:
+    - name: Publish Job Summary
+      id: publish-summary
+      run: |
+        echo "## Build Summary" > $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Application:** ${{ inputs.application }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Component:** ${{ inputs.component-name }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Version:** ${{ inputs.packagejson-version }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Packaging:** ${{ inputs.packaging }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Group ID:** ${{ inputs.group-id }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Artifact Name:** ${{ inputs.artifact-name }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Node Version:** ${{ inputs.node-version }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Commit SHA:** ${{ inputs.commit-sha }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Build Number:** ${{ github.run_number }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Build URL:** [Link](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})" >> $GITHUB_STEP_SUMMARY
+          
+          if [ "${{ inputs.publish-artifacts }}" = "true" ]; then
+            echo "- **Artifacts Published to Artifactory:** Yes" >> $GITHUB_STEP_SUMMARY
+            echo "- **Artifactory Build Name:** ${{ inputs.artifactory-build-name }}" >> $GITHUB_STEP_SUMMARY
+            echo "- **Artifactory Build Number:** ${{ inputs.artifactory-build-number }}" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "- **Artifacts Published to Artifactory:** No" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          if [ -n "${{ env.DOCKER_IMAGE_DIGEST }}" ]; then
+            echo "- **Docker Image Digest:** `${{ env.DOCKER_IMAGE_DIGEST }}`" >> $GITHUB_STEP_SUMMARY
+            echo "- **Docker Image URL:** `${{ env.ACR_DEV_REGISTRY }}/${{ inputs.artifact-name }}:${{ inputs.version }}`" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          echo "### Executed Jobs Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Job | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----|--------|" >> $GITHUB_STEP_SUMMARY
+
+          function job_status {
+            if [[ "$1" == "success" ]]; then
+              echo "✅"
+            elif [[ "$1" == "skipped" ]]; then
+              echo "⏭️"
+            elif [[ "$1" == "failure" ]]; then
+              echo "❌"
+            else
+              echo "❓"
+            fi
+          }
+
+          echo "| Prepare | $(job_status "${{ inputs.prepare-result }}") |" >> $GITHUB_STEP_SUMMARY
+          echo "| Build and Test | $(job_status "${{ inputs.build-result }}") |" >> $GITHUB_STEP_SUMMARY
+
+          # Only include publish-artifact if publish-artifacts was intended
+          if [ "${{ inputs.publish-artifacts }}" = "true" ]; then
+            echo "| Publish Artifact | $(job_status "${{ inputs.publish-artifact-result }}") |" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          # Docker image job (conditionally included)
+          if [ "${{ inputs.dockerfile != '' }}" = "true" ]; then
+            echo "| Build and Push Docker Image | $(job_status "${{ inputs.build-publish-docker-result }}") |" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      shell: bash

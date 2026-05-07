@@ -1,0 +1,37 @@
+name: Load Workflows Configs
+description: "Action to load workflow configurations and environment variables from a specified repository."
+inputs:
+  dso-ghe-app-id:
+    description: 'GitHub App ID for authentication'
+    required: true
+  dso-ghe-private-key:
+    description: 'GitHub App Private Key for authentication'
+    required: true
+  dso-workflow-repository:
+    description: 'Repository containing the workflow configurations'
+    required: true
+    type: string
+runs:
+  using: 'composite'
+  steps:
+  ## Authenticate and checkout the workflows configs repository
+  - uses: actions/create-github-app-token@v2
+    id: app-token-config-global
+    with:
+      app-id: ${{ inputs.dso-ghe-app-id }}
+      private-key: ${{ inputs.dso-ghe-private-key }}
+      repositories: |
+        ${{ inputs.dso-workflow-repository }}
+      owner: marvin-lorenzo-ntt
+  
+  ## Checkout global workflows configs repo with sparse checkout
+  - uses: actions/checkout@v5
+    with:
+      token: ${{ steps.app-token-config-global.outputs.token }}
+      ref: main
+      repository: marvin-lorenzo-ntt/${{ inputs.dso-workflow-repository }}
+      path: ${{ inputs.dso-workflow-repository }}
+      persist-credentials: false
+      fetch-depth: 1
+
+  

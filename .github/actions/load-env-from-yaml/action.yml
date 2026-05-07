@@ -1,0 +1,112 @@
+name: "Load Env Vars from YAML"
+description: "Loads environment variables from one or more YAML files and exports them to GITHUB_ENV"
+inputs:
+  yaml-path:
+    description: "One or more YAML file paths (single line or multiline)"
+    required: true
+  fail-if-missing:
+    description: "Fail if any YAML file is missing"
+    required: false
+    default: false
+    type: boolean
+runs:
+  using: "composite"
+  steps:
+    - name: Install PyYAML
+      run: |
+        # First check if PyYAML is already available
+        if python3 -c "import yaml" 2>/dev/null; then
+          echo "PyYAML is already available"
+          exit 0
+        fi
+        
+        # Try to install pip first if it's missing
+        if ! python3 -c "import pip" 2>/dev/null; then
+          echo "pip module not found, trying to install pip..."
+          if curl -sS https://bootstrap.pypa.io/get-pip.py | python3 --user; then
+            echo "pip installed successfully"
+            # Update PATH to include user local bin
+            export PATH="$HOME/.local/bin:$PATH"
+          elif python3 -m ensurepip --user; then
+            echo "pip installed via ensurepip"
+            export PATH="$HOME/.local/bin:$PATH"
+          else
+            echo "Failed to install pip, trying system packages..."
+          fi
+        fi
+        
+        # Try different Python package managers in order of preference
+        if python3 -m pip install --user PyYAML; then
+          echo "PyYAML installed successfully with python3 -m pip --user"
+        elif pip3 install --user PyYAML; then
+          echo "PyYAML installed successfully with pip3 --user"
+        elif pip install --user PyYAML; then
+          echo "PyYAML installed successfully with pip --user"
+        elif python3 -m pip install PyYAML; then
+          echo "PyYAML installed successfully with python3 -m pip"
+        elif pip3 install PyYAML; then
+          echo "PyYAML installed successfully with pip3"
+        elif pip install PyYAML; then
+          echo "PyYAML installed successfully with pip"
+        elif command -v apt-get >/dev/null 2>&1; then
+          echo "Trying apt-get without sudo..."
+          apt-get update && apt-get install -y python3-yaml 2>/dev/null || echo "apt-get failed (may need sudo)"
+        elif command -v yum >/dev/null 2>&1; then
+          echo "Trying yum without sudo..."
+          yum install -y python3-PyYAML 2>/dev/null || echo "yum failed (may need sudo)"
+        elif command -v dnf >/dev/null 2>&1; then
+          echo "Trying dnf without sudo..."
+          dnf install -y python3-PyYAML 2>/dev/null || echo "dnf failed (may need sudo)"
+        elif command -v apk >/dev/null 2>&1; then
+          echo "Trying apk without sudo..."
+          apk add py3-yaml 2>/dev/null || echo "apk failed (may need sudo)"
+        else
+          echo "No package manager found"
+        fi
+        
+        # Final check if PyYAML is now available
+        if python3 -c "import yaml" 2>/dev/null; then
+          echo "PyYAML is now available"
+        else
+          echo "Error: Failed to install PyYAML with all available methods"
+          echo "System information:"
+          echo "Python version: $(python3 --version 2>&1 || echo 'python3 not available')"
+          echo "Python executable: $(which python3 2>/dev/null || echo 'python3 not found')"
+          echo "Available package managers:"
+          which apt-get 2>/dev/null && echo "apt-get: available" || echo "apt-get: not found"
+          which yum 2>/dev/null && echo "yum: available" || echo "yum: not found" 
+          which dnf 2>/dev/null && echo "dnf: available" || echo "dnf: not found"
+          which apk 2>/dev/null && echo "apk: available" || echo "apk: not found"
+          exit 1
+        fi
+      shell: bash
+      
+    - name: Load YAML to Environment
+      run: |
+        import os, sys, yaml
+
+        yaml_paths = """${{ inputs.yaml-path }}""".splitlines()
+        fail_if_missing = "${{ inputs.fail-if-missing }}".lower() == "true"
+        github_env = os.environ.get("GITHUB_ENV")
+
+        for yaml_path in yaml_paths:
+            yaml_path = yaml_path.strip()
+            if not yaml_path:
+                continue
+            if not os.path.isfile(yaml_path):
+                print(f"YAML file not found: {yaml_path}")
+                if fail_if_missing:
+                    sys.exit(1)
+                continue
+            with open(yaml_path) as f:
+                data = yaml.safe_load(f)
+                if isinstance(data, dict):
+                    for k, v in data.items():
+                        line = f"{k}={v}"
+                        print(f"Setting env var from {yaml_path}: {line}")
+                        with open(github_env, "a") as envf:
+                            envf.write(line + "\n")
+                else:
+                    print(f"YAML file {yaml_path} is not a flat key-value mapping.")
+
+      shell: python

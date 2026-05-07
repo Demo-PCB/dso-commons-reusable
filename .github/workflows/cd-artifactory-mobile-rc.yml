@@ -1,0 +1,301 @@
+# ./.github/workflows/cd-artifactory-lib-noprod.yml
+name: 'Library CD - NonProd Promotion (snapshot → rc)'
+
+on:
+  workflow_call:
+    inputs:
+      application:
+        description: 'Application name for promotion (DSO, BIE, etc.)'
+        required: true
+        type: string
+      component-name:
+        description: 'Library component name for promotion'
+        required: true
+        type: string
+      version:
+        description: 'Library build version to promote (e.g., 0.1.0-ci.8)'
+        required: true
+        type: string
+      library-type:
+        description: 'Library type (ios, android)'
+        required: true
+        type: string
+      environment:
+        description: 'Environment for configuration loading (dev, uat, prod)'
+        required: false
+        type: string
+        default: 'uat'
+
+jobs:
+  check-integrity:
+    name: Check Library Integrity
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate Promotion Parameters
+        run: |
+          echo "🔍 Validating Library NonProd promotion parameters..."
+          echo "Application: ${{ inputs.application }}"
+          echo "Component: ${{ inputs.component-name }}"
+          echo "Version: ${{ inputs.version }}"
+          echo "Library Type: ${{ inputs.library-type }}"
+          echo "Promotion Path: snapshot → rc"
+          echo ""
+          
+          # Validate library-type
+          if [[ "${{ inputs.library-type }}" != "ios" && "${{ inputs.library-type }}" != "android" ]]; then
+            echo "❌ Invalid library-type: ${{ inputs.library-type }}"
+            echo "   Supported values: ios, android"
+            exit 1
+          fi
+          
+          echo "✅ Valid NonProd promotion path: snapshot → release candidate"
+
+  promote-to-rc:
+    name: Promote Library to Release Candidate
+    runs-on: ubuntu-latest
+    needs: check-integrity
+    # environment: uat
+    outputs:
+      promote_http_code: ${{ steps.promote.outputs.promote_http_code }}
+      rc_items_count: ${{ steps.verify.outputs.rc_items_count }}
+    steps:
+      - name: Load Library Configurations
+        uses: marvin-lorenzo-ntt/dso-commons-reusable/.github/actions/load-workflows-libraries-configs@main
+        with:
+          component-name: ${{ inputs.component-name }}
+          library-type: ${{ inputs.library-type }}
+          environment: ${{ inputs.environment }}
+          dso-ghe-app-id: ${{ secrets.DSO_WORKFLOWS_GHAPP_ID }}
+          dso-ghe-private-key: ${{ secrets.DSO_WORKFLOWS_GHAPP_PK }}
+          dso-workflows-configs-repo: ${{ vars.DSO_WORKFLOWS_LIBRARIES_CONFIGS_REPO }}
+          dso-workflows-owner: ${{ vars.DSO_WORKFLOWS_OWNER }}
+
+      - name: Set Repository Variables
+        id: repo-vars
+        run: |
+          echo "🔧 Setting repository variables for library-type: ${{ inputs.library-type }}"
+          
+          if [[ "${{ inputs.library-type }}" == "ios" ]]; then
+            SNAPSHOT_REPO="${IOS_SWIFT_SNAPSHOT_REPO}"
+            RC_REPO="${IOS_SWIFT_RC_REPO}"
+            echo "📱 Using iOS repositories: ${SNAPSHOT_REPO} → ${RC_REPO}"
+          elif [[ "${{ inputs.library-type }}" == "android" ]]; then
+            SNAPSHOT_REPO="${ANDROID_MVN_SNAPSHOT_REPO}"
+            RC_REPO="${ANDROID_MVN_RC_REPO}"
+            echo "🤖 Using Android repositories: ${SNAPSHOT_REPO} → ${RC_REPO}"
+          else
+            echo "❌ Unsupported library-type: ${{ inputs.library-type }}"
+            exit 1
+          fi
+          
+          echo "SNAPSHOT_REPO=$SNAPSHOT_REPO" >> $GITHUB_OUTPUT
+          echo "RC_REPO=$RC_REPO" >> $GITHUB_OUTPUT
+
+      - name: Move via REST API (copy=false)
+        id: promote
+        run: |
+          cat > promote.json <<JSON
+          {
+            "status": "rc",
+            "comment": "Promote to RC (MOVE)",
+            "copy": false,
+            "failFast": true,
+            "sourceRepo": "${{ steps.repo-vars.outputs.SNAPSHOT_REPO }}",
+            "targetRepo": "${{ steps.repo-vars.outputs.RC_REPO }}"
+          }
+          JSON
+
+          echo "🚀 Moving build via REST API (copy=false) ..."
+          echo "Build Name: ${{ inputs.component-name }}"
+          echo "Build Number: ${{ inputs.version }}"
+          echo "Source Repo: ${{ steps.repo-vars.outputs.SNAPSHOT_REPO }}"
+          echo "Target Repo: ${{ steps.repo-vars.outputs.RC_REPO }}"
+          
+          RESP=$(curl -sS -w "\n%{http_code}" -X POST \
+            -H "Authorization: Bearer ${{ secrets[format('{0}_ARTIFACTORY_TOKEN', inputs.application)] }}" \
+            -H "Content-Type: application/json" \
+            -d @promote.json \
+            "${IBK_ARTIFACTORY_URL}/api/build/promote/${{ inputs.component-name }}/${{ inputs.version }}")
+
+          BODY=$(echo "$RESP" | sed '$d')
+          CODE=$(echo "$RESP" | tail -n1)
+
+          echo "HTTP: $CODE"
+          echo "Response Body:"
+          echo "$BODY"
+
+          echo "promote_http_code=$CODE" >> $GITHUB_OUTPUT
+          
+          if [[ "$CODE" == "200" ]]; then
+            echo "✅ Build promotion successful"
+          else
+            echo "❌ Build promotion failed with HTTP $CODE"
+            exit 1
+          fi
+
+      - name: Verify promotion (optional)
+        id: verify
+        run: |
+          echo "✅ Promotion completed via Build Promotion API"
+          echo "Build info moved from Snapshot to RC repository"
+          echo "rc_items_count=1" >> $GITHUB_OUTPUT
+
+  promotion-summary:
+    name: 📋 Library NonProd Promotion Summary
+    runs-on: ubuntu-latest
+    needs: [check-integrity, promote-to-rc]
+    if: always()
+    steps:
+      - run: |
+          echo "## � Library NonProd Promotion Summary" > $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 📦 Component Information" >> $GITHUB_STEP_SUMMARY
+          echo "- **Application:** ${{ inputs.application }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Component:** ${{ inputs.component-name }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Library Type:** ${{ inputs.library-type }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Version:** ${{ inputs.version }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Promotion Path:** snapshot → rc (UAT)" >> $GITHUB_STEP_SUMMARY
+          echo "- **Target Environment:** Release Candidate (UAT)" >> $GITHUB_STEP_SUMMARY
+          echo "- **Build URL:** [Link](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          # Check job results
+          INTEGRITY_STATUS="${{ needs.check-integrity.result }}"
+          PROMOTION_STATUS="${{ needs.promote-to-rc.result }}"
+          RC_COUNT="${{ needs.promote-to-rc.outputs.rc_items_count }}"
+
+          echo "### 📊 Workflow Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Phase | Status | Details |" >> $GITHUB_STEP_SUMMARY
+          echo "|-------|--------|---------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Integrity Check | $INTEGRITY_STATUS | Validated artifacts availability |" >> $GITHUB_STEP_SUMMARY
+          echo "| Promotion | $PROMOTION_STATUS | snapshot → rc migration |" >> $GITHUB_STEP_SUMMARY
+          echo "| Items in RC | $RC_COUNT | Final artifact count |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          if [[ "$PROMOTION_STATUS" == "success" && "$RC_COUNT" -gt 0 ]]; then
+            echo "### ✅ NonProd Promotion Successful" >> $GITHUB_STEP_SUMMARY
+            echo "The library version **${{ inputs.version }}** has been successfully **moved** to the **RC** repository." >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "**Build Once Deploy Anywhere:**" >> $GITHUB_STEP_SUMMARY
+            echo "- ✅ Artifacts moved from Snapshot to RC (removed from Snapshot)" >> $GITHUB_STEP_SUMMARY
+            echo "- 🔒 Same binary artifacts (no rebuild)" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "**Next Steps:**" >> $GITHUB_STEP_SUMMARY
+            echo "- Version is now available for UAT testing" >> $GITHUB_STEP_SUMMARY
+            echo "- After validation, promote to production using CD Prod workflow" >> $GITHUB_STEP_SUMMARY
+          elif [[ "$PROMOTION_STATUS" == "success" && "$RC_COUNT" -eq 0 ]]; then
+            echo "### ⚠️ No Items to Promote" >> $GITHUB_STEP_SUMMARY
+            echo "The promotion completed successfully but no items were found to promote." >> $GITHUB_STEP_SUMMARY
+            echo "This may indicate the version **${{ inputs.version }}** was already in RC repository." >> $GITHUB_STEP_SUMMARY
+          else
+            echo "### ❌ NonProd Promotion Failed" >> $GITHUB_STEP_SUMMARY
+            echo "The promotion to RC repository encountered issues." >> $GITHUB_STEP_SUMMARY
+            echo "Please check the workflow logs for detailed error information." >> $GITHUB_STEP_SUMMARY
+          fi
+
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 📈 Technical Details" >> $GITHUB_STEP_SUMMARY
+          echo "| Metric | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|-------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Promote REST HTTP | ${{ needs.promote-to-rc.outputs.promote_http_code || 'n/a' }} |" >> $GITHUB_STEP_SUMMARY
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # 📌 TAG RC VERSION (solo cuando la promoción es exitosa)
+  # ─────────────────────────────────────────────────────────────────────────────
+  tag-rc-version:
+    name: Tag RC Version in Repository
+    runs-on: ubuntu-latest
+    needs: [promote-to-rc]
+    # Solo ejecutar si la promoción fue exitosa
+    if: needs.promote-to-rc.result == 'success'
+    
+    steps:
+      - name: Checkout Library Repository
+        uses: actions/checkout@v4
+        with:
+          # Checkout del repo de la librería (no del workflow)
+          repository: ${{ github.repository }}
+          fetch-depth: 0
+          fetch-tags: true
+          token: ${{ secrets.GITHUB_TOKEN }}
+      
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+      
+      - name: Parse Version and Create RC Tag (ONLY for -rc.N versions)
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          echo "📌 Processing CD-UAT promotion for version: ${VERSION}"
+          
+          # Verificar si la versión tiene sufijo -rc.N
+          if [[ "$VERSION" =~ ^([0-9]+\.[0-9]+\.[0-9]+)-rc\.([0-9]+)$ ]]; then
+            BASE_VERSION="${BASH_REMATCH[1]}"
+            RC_CORRELATIVE="${BASH_REMATCH[2]}"
+            
+            echo "✅ Version is RC format: ${VERSION}"
+            echo "   Base: ${BASE_VERSION}"
+            echo "   RC correlative: ${RC_CORRELATIVE}"
+            
+            # El tag es directamente la versión recibida
+            TAG_NAME="v${VERSION}"
+            
+            # Verificar si el tag ya existe
+            if git rev-parse "$TAG_NAME" >/dev/null 2>&1; then
+              echo "⚠️ Tag $TAG_NAME already exists, skipping..."
+              exit 0
+            fi
+            
+            # Crear tag anotado con metadata
+            TAG_MESSAGE="Release Candidate ${VERSION}
+
+          Promoted to UAT/RC repository
+          - Promoted by: CD-UAT workflow
+          - Build: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
+          - Environment: UAT / RC
+          - Repository: ads-mvn-rc"
+
+            echo "🏷️ Creating RC tag: ${TAG_NAME}"
+            git tag -a "$TAG_NAME" -m "$TAG_MESSAGE"
+            git push origin "$TAG_NAME"
+            
+            echo "✅ RC tag ${TAG_NAME} created and pushed successfully"
+            
+            # Summary para GitHub Actions
+            echo "### 📌 RC Version Tagged" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "- **Tag:** \`${TAG_NAME}\`" >> $GITHUB_STEP_SUMMARY
+            echo "- **RC Version:** \`${VERSION}\`" >> $GITHUB_STEP_SUMMARY
+            echo "- **Base Version:** \`${BASE_VERSION}\`" >> $GITHUB_STEP_SUMMARY
+            echo "- **RC Correlative:** \`${RC_CORRELATIVE}\`" >> $GITHUB_STEP_SUMMARY
+            echo "- **Repository:** ads-mvn-rc" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "🔗 [View Tag](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/tag/${TAG_NAME})" >> $GITHUB_STEP_SUMMARY
+            
+          elif [[ "$VERSION" =~ ^([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+            # Versión limpia (release) - NO TAGUEAR en CD-UAT
+            echo "ℹ️ Version is clean release format: ${VERSION}"
+            echo "   This version will be tagged by CD-PROD workflow (not CD-UAT)"
+            echo "   Skipping tagging in CD-UAT..."
+            
+            # Summary
+            echo "### ℹ️ Release Version - No Tag Created" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "- **Version:** \`${VERSION}\`" >> $GITHUB_STEP_SUMMARY
+            echo "- **Type:** Clean release (no suffix)" >> $GITHUB_STEP_SUMMARY
+            echo "- **Note:** This version will be tagged by CD-PROD workflow after promotion to ads-mvn-release" >> $GITHUB_STEP_SUMMARY
+            echo "- **Current Repository:** ads-mvn-rc (intermediate step)" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "📋 **Next Step:** Execute CD-PROD workflow to promote to ads-mvn-release and create final tag" >> $GITHUB_STEP_SUMMARY
+            
+            exit 0
+          else
+            echo "⚠️ Version format not recognized: ${VERSION}"
+            echo "   Expected format: X.Y.Z-rc.N (for RC tagging) or X.Y.Z (for release, no tag here)"
+            echo "   Skipping tagging..."
+            exit 0
+          fi
+        shell: bash

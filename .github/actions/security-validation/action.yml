@@ -1,0 +1,81 @@
+inputs:
+  application:
+    description: "Application name"
+    required: true
+    type: string
+  isLibrary:
+    description: "Is it Library"
+    required: false
+    type: string 
+  isdockerfile:
+    description: "Is it Dockerfile"
+    required: false
+    type: boolean
+  fluid-attacks-token:
+    description: "Fluids Attacks Token"
+    required: true
+    type: string
+runs:
+  using: "composite"
+  steps:
+      # Scan for secrets using Gitleaks
+      - name: Run Gitleaks Secret Scan
+        if: ${{ env.FLAG_RUN_SECRET_SCAN != 'false' }}
+        shell: bash
+        run: |
+          GITLEAKS_URL="https://github.com/gitleaks/gitleaks/releases/download/v8.27.2/gitleaks_8.27.2_linux_x64.tar.gz"
+          curl -sSfL $GITLEAKS_URL | tar -xz gitleaks
+          chmod +x gitleaks
+
+          ./gitleaks dir -v --report-format json --fexit-code 0 --redact 70 --report-path gitleaks.json .
+      - name: Show context
+        shell: bash
+        run: |
+          echo "event: ${{ github.event_name }}"
+          echo "FLAG_RUN_DEPENDABOT_ON_PR: ${{ env.FLAG_RUN_DEPENDABOT_ON_PR }}"
+
+      - name: (SCA) Dependency Review
+        if: ${{ github.event_name == 'pull_request' && env.FLAG_RUN_DEPENDABOT_ON_PR != 'false' }}
+        uses: actions/dependency-review-action@v4
+
+      - name: (SAST) Run FluidAttacks Static scan
+        shell: bash
+        if: ${{ env.FLAG_RUN_FLUID_ATTACKS_STATIC_SCAN != 'false' }}
+        run: |
+          REPONAME=${{ github.event.repository.name }}
+          docker run --rm  fluidattacks/forces:latest forces --token ${{ inputs.fluid-attacks-token }} --repo-name $REPONAME --static --strict -vvvv
+
+      - name: (DAST) Run FluidAttacks Dynamic scan
+        shell: bash
+        if: ${{ env.FLAG_RUN_FLUID_ATTACKS_DYNAMIC_SCAN != 'false' }}
+        run: |
+          REPONAME=${{ github.event.repository.name }}
+          docker run --rm  fluidattacks/forces:latest forces --token ${{ inputs.fluid-attacks-token }} --repo-name $REPONAME --dynamic --strict -vvvv
+
+      - name: (SAST) Run Hadolint Dockerfile
+        uses: hadolint/hadolint-action@v3.1.0
+        if: ${{ inputs.isdockerfile != '' && inputs.isLibrary == false }}
+        with:
+          dockerfile: ${{ inputs.isdockerfile }}
+        continue-on-error: true
+      
+      - name: (Whitelist) Validate Docker Base Image
+        shell: bash
+        if: ${{ inputs.isdockerfile != '' && inputs.isLibrary == false }}
+        run: |
+          FROM_LINE=$(awk '/^FROM/ {print $2; exit}' Dockerfile)
+          ALLOWED_IMAGES=$(<${{ env.DSO_WORKFLOWS_CONFIGS_REPO }}/global-configurations/docker/allowed-images.list)
+          echo "Validating base image: $FROM_LINE"
+          if ! grep -Fxq "$FROM_LINE" ${{ env.DSO_WORKFLOWS_CONFIGS_REPO }}/global-configurations/docker/allowed-images.list; then
+            echo "❌ Only allowed images are permitted!"
+            echo "   Found: $FROM_LINE"
+            echo -e "   Allowed: \n $ALLOWED_IMAGES"
+            exit 1
+          fi
+          echo "✅ Image validation passed."
+        continue-on-error: true
+
+      - name: Check results and fail if issues found
+        shell: bash
+        run: |
+          echo "TODO: Checking security scan results..."

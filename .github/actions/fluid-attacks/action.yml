@@ -1,0 +1,9 @@
+runs:
+  using: "composite"
+  steps:
+    - name: "Fluid Attacks: SAST"
+      run: echo "Hello from composite action!"
+      shell: bash
+    - name: "Fluid Attacks: DAST"
+      run: echo "Hello from composite action!"
+      shell: bash

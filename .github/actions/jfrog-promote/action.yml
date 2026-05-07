@@ -1,0 +1,108 @@
+# ./.github/actions/jfrog-promote/action.yml
+name: 'JFrog Promote iOS Library (HTTP)'
+description: 'Copies an iOS XCFramework ZIP from snapshot repo to RC repo using HTTP (no CLI/system APIs)'
+
+inputs:
+  application:
+    required: true
+  component-name:
+    required: true
+  version:
+    required: true
+  source-repository:
+    description: 'e.g. dso-swift-snapshot'
+    required: true
+  target-repository:
+    description: 'e.g. dso-swift-rc'
+    required: true
+  artifactory-url:
+    description: 'https://<org>.jfrog.io o https://host[/artifactory]'
+    required: true
+  artifactory-token:
+    required: true
+  library-type:
+    description: 'ios/framework/package/library'
+    required: false
+    default: 'ios'
+  artifact-filename:
+    description: 'Nombre exacto del ZIP (ej. CipherFramework.xcframework.zip)'
+    required: false
+    # 👉 Hardcode recomendado para tu caso (puedes cambiarlo si necesitas):
+    default: 'CipherFramework.xcframework.zip'
+
+outputs:
+  promotion-status:
+    value: ${{ steps.copy.outputs.status }}
+  build-name:
+    value: ${{ steps.copy.outputs.build-name }}
+  target-repository:
+    value: ${{ inputs.target-repository }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Normalize base URL
+      id: base
+      shell: bash
+      run: |
+        set -euo pipefail
+        RAW="${{ inputs.artifactory-url }}"
+        RAW="${RAW%/}"   # quita trailing /
+        echo "🔗 URL recibida: $RAW"
+        echo "base_url=$RAW" >> "$GITHUB_OUTPUT"
+
+    - name: Copy ZIP (HTTP GET→PUT, sin discovery)
+      id: copy
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        BASE="${{ steps.base.outputs.base_url }}"
+        TOKEN="${{ inputs.artifactory-token }}"
+        component="${{ inputs.component-name }}"
+        version="${{ inputs.version }}"
+        src_repo="${{ inputs.source-repository }}"
+        dst_repo="${{ inputs.target-repository }}"
+        lib_type="${{ inputs.library-type }}"
+        artifact="${{ inputs.artifact-filename }}"
+
+        # Asegura que las rutas de repo usen /artifactory
+        if [[ "$BASE" != */artifactory ]]; then
+          REPO_BASE="${BASE}/artifactory"
+        else
+          REPO_BASE="${BASE}"
+        fi
+
+        build_name="$(echo "$component" | tr '[:upper:]' '[:lower:]')"
+        echo "build-name=${build_name}" >> "$GITHUB_OUTPUT"
+
+        # Validación: nombre del ZIP obligatorio
+        if [[ -z "$artifacts" && -z "$artifact" ]]; then
+          echo "❌ 'artifact-filename' es requerido para este modo sin discovery."
+          exit 1
+        fi
+
+        src_url="${REPO_BASE}/${src_repo}/${component}/${version}/${artifact}"
+        dst_url="${REPO_BASE}/${dst_repo}/${lib_type}/${component}/${version}/${artifact}"
+
+        echo "📦 Promoción HTTP (sin discovery)"
+        echo "  GET: $src_url"
+        echo "  PUT: $dst_url"
+
+        echo "⬇️  GET origen"
+        curl -fsSL -H "Authorization: Bearer ${TOKEN}" \
+             -o "${artifact}" \
+             "${src_url}"
+
+        echo "⬆️  PUT destino"
+        curl -fsSL -X PUT -H "Authorization: Bearer ${TOKEN}" \
+             -T "${artifact}" \
+             "${dst_url}"
+
+        echo "🔍 Verificando destino (api/storage):"
+        curl -fsSL -H "Authorization: Bearer ${TOKEN}" \
+             "${REPO_BASE}/api/storage/${dst_repo}/${lib_type}/${component}/${version}/${artifact}" \
+             | sed -e '1,15!d' || true
+
+        rm -f "${artifact}" || true
+        echo "status=success" >> "$GITHUB_OUTPUT"
