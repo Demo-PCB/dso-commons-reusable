@@ -58,7 +58,7 @@ runs:
         global-variables
 
   - name: Load Library Environment Variables
-    uses: marvin-lorenzo-ntt/dso-commons-reusable/.github/actions/load-env-from-yaml@main
+    uses: Demo-PCB/dso-commons-reusable/.github/actions/load-env-from-yaml@main
     with:
       yaml-path: |
         ${{ inputs.dso-workflows-configs-repo }}/global-variables/common.yaml

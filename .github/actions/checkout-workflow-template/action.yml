@@ -22,14 +22,14 @@ runs:
       private-key: ${{ inputs.dso-ghe-private-key }}
       repositories: |
         ${{ inputs.dso-workflow-repository }}
-      owner: marvin-lorenzo-ntt
+      owner: Demo-PCB
   
   ## Checkout global workflows configs repo with sparse checkout
   - uses: actions/checkout@v5
     with:
       token: ${{ steps.app-token-config-global.outputs.token }}
       ref: main
-      repository: marvin-lorenzo-ntt/${{ inputs.dso-workflow-repository }}
+      repository: Demo-PCB/${{ inputs.dso-workflow-repository }}
       path: ${{ inputs.dso-workflow-repository }}
       persist-credentials: false
       fetch-depth: 1

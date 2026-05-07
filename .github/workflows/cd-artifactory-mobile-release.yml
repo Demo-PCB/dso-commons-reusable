@@ -68,7 +68,7 @@ jobs:
 
       - name: Load Library Configurations
         if: ${{ inputs.library-type == 'android' }}
-        uses: marvin-lorenzo-ntt/dso-commons-reusable/.github/actions/load-workflows-libraries-configs@main
+        uses: Demo-PCB/dso-commons-reusable/.github/actions/load-workflows-libraries-configs@main
         with:
           component-name: ${{ inputs.component-name }}
           library-type: ${{ inputs.library-type }}
@@ -80,7 +80,7 @@ jobs:
 
       - name: Run Release Gate
         if: ${{ inputs.library-type == 'android' }}
-        uses: marvin-lorenzo-ntt/dso-commons-reusable/.github/actions/release-gate@main
+        uses: Demo-PCB/dso-commons-reusable/.github/actions/release-gate@main
         env:
           ARTIFACTORY_TOKEN: ${{ secrets[format('{0}_ARTIFACTORY_TOKEN', inputs.application)] }}
           PLUSTI_USERNAME:   ${{ secrets.PLUSTI_USERNAME }}
@@ -105,7 +105,7 @@ jobs:
     steps:
 
       - name: Load Library Configurations
-        uses: marvin-lorenzo-ntt/dso-commons-reusable/.github/actions/load-workflows-libraries-configs@main
+        uses: Demo-PCB/dso-commons-reusable/.github/actions/load-workflows-libraries-configs@main
         with:
           component-name: ${{ inputs.component-name }}
           library-type: ${{ inputs.library-type }}

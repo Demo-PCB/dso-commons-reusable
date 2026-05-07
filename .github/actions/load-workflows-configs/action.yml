@@ -100,7 +100,7 @@ runs:
 
   # Load global Environment Variables and Application Specific Variables
   - name: Load Environment Variables
-    uses: marvin-lorenzo-ntt/dso-commons-reusable/.github/actions/load-env-from-yaml@main
+    uses: Demo-PCB/dso-commons-reusable/.github/actions/load-env-from-yaml@main
     with:
       yaml-path: |
         
@@ -128,7 +128,7 @@ runs:
 
   - name: Load Environment Variables from Environment
     if: ${{ inputs.environment != ''}}
-    uses: marvin-lorenzo-ntt/dso-commons-reusable/.github/actions/load-env-from-yaml@main
+    uses: Demo-PCB/dso-commons-reusable/.github/actions/load-env-from-yaml@main
     with:
       yaml-path: |
         ## Global configs by repository
@@ -273,7 +273,7 @@ runs:
 
 #   # Load global Environment Variables and Application Specific Variables
 #   - name: Load Environment Variables
-#     uses: marvin-lorenzo-ntt/dso-commons-reusable/.github/actions/load-env-from-yaml@main
+#     uses: Demo-PCB/dso-commons-reusable/.github/actions/load-env-from-yaml@main
 #     with:
 #       yaml-path: |
 #         ${{ inputs.dso-workflows-configs-repo }}/global-variables/common.yaml
@@ -285,7 +285,7 @@ runs:
 
 #   - name: Load Environment Variables from Environment
 #     if: ${{ inputs.environment != '' }}
-#     uses: marvin-lorenzo-ntt/dso-commons-reusable/.github/actions/load-env-from-yaml@main
+#     uses: Demo-PCB/dso-commons-reusable/.github/actions/load-env-from-yaml@main
 #     with:
 #       yaml-path: |
 #          dso-${{ inputs.application }}-workflows-configs/variables/cloud/${{env.CLOUD}}/regions/${{env.REGION}}/${{ inputs.environment }}/default.yaml
@@ -293,7 +293,7 @@ runs:
 
 #   - name: Load Environment Variables from Environment MULTIREGION
 #     if: ${{ inputs.environment == env.MULTI_REGION_ENV_1 }}
-#     uses: marvin-lorenzo-ntt/dso-commons-reusable/.github/actions/load-env-from-yaml@main
+#     uses: Demo-PCB/dso-commons-reusable/.github/actions/load-env-from-yaml@main
 #     with:
 #       yaml-path: |
 #          dso-${{ inputs.application }}-workflows-configs/variables/cloud/${{env.CLOUD}}/regions/${{env.MULTI_REGION_NAME_1}}/${{ inputs.environment }}/${{ inputs.component-name }}.yaml

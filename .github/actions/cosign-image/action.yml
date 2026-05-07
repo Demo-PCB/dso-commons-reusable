@@ -80,7 +80,7 @@ runs:
       run: >
         cosign verify-attestation
         --type custom 
-        --certificate-identity-regexp="https://github.com/marvin-lorenzo-ntt/dso-*"
+        --certificate-identity-regexp="https://github.com/Demo-PCB/dso-*"
         --certificate-oidc-issuer=https://token.actions.githubusercontent.com
         --output-file="${{inputs.output_result_path}}"  
         ${{inputs.reference_image}} 
